@@ -34,8 +34,13 @@ export function HomePage({ highScore, onStart, devStart, onDevStartChange }: Pro
       </CenterSlot>
     ),
     bottom: (
-      <div className="flex w-full -translate-y-12 flex-col items-center gap-3 px-6">
-        {DEV_TOOLS && <DevStartPanel value={devStart} onChange={onDevStartChange} />}
+      <div className="relative flex w-full -translate-y-12 flex-col items-center gap-3 px-6">
+        {/* 開発用の欄は、ハイスコアとスタートボタンの位置を動かさないよう、その上に浮かせて置く */}
+        {DEV_TOOLS && (
+          <div className="absolute inset-x-6 bottom-full mb-3 flex justify-center">
+            <DevStartPanel value={devStart} onChange={onDevStartChange} />
+          </div>
+        )}
         {highScore > 0 && (
           <div className="font-heading text-sm font-bold text-white text-outline">ハイスコア {highScore.toLocaleString()}</div>
         )}

@@ -4,11 +4,19 @@
 // だけをEngineStateListener経由でReact側に伝える。
 //
 // 流れ(ステージごと): 「STAGE n」表示 → ザコひなこと決まった時間戦う → WARNING → ボス(でかひなこ)登場
-// (ボス戦中もザコが出てくる) → 倒せば次のステージへ。最後のステージのボスを倒せばクリア。
+// (ボス戦中もザコが出てくる) → 倒せば次のステージへ。最後のステージのボスを倒すとボーナスステージ
+// (攻撃してこない硬いザコが大量に押し寄せてくる)になり、それが終わればクリア。
 // ステージごとの難しさは constants.ts の STAGES。ライフが0になったらゲームオーバー。
 
 import {
   BG_SCROLL_SPEED,
+  BONUS_END_WAIT_MS,
+  BONUS_ENEMY_HP,
+  BONUS_ENEMY_SCORE,
+  BONUS_MS,
+  BONUS_ROW_COUNT,
+  BONUS_ROW_INTERVAL_MS,
+  BONUS_SPEED,
   PLANET_SCROLL_SPEED,
   BOSS_DYING_MS,
   BOSS_ENRAGE_RATIO,
@@ -107,12 +115,12 @@ export interface EngineState {
 export type EngineStateListener = (state: EngineState) => void;
 
 export interface StartOptions {
-  stageIndex?: number; // 始めるステージ(0から)
+  stageIndex?: number; // 始めるステージ(0から)。STAGES.length なら、最後のステージの後のボーナスステージから
   shotLevel?: number; // 始める時の攻撃レベル(1〜MAX_SHOT_LEVEL)
   startAtBoss?: boolean; // 最初のステージをザコ戦を飛ばしてボス戦から始める
 }
 
-type EnemyKind = "straight" | "zigzag" | "swoop" | "dive" | "beamer" | "laser" | "cross" | "guard" | "tank" | "orbit";
+type EnemyKind = "straight" | "zigzag" | "swoop" | "dive" | "beamer" | "laser" | "cross" | "guard" | "tank" | "orbit" | "bonus";
 
 interface Enemy {
   sprite: Sprite;
@@ -225,8 +233,9 @@ interface FloatingText {
 }
 
 // intro: 「STAGE n」表示 / waves: ザコ戦 / clearing: 残ったザコがいなくなるのを待つ / warning: ボスの予告 /
-// boss: ボス戦 / stage-clear: ボスを倒して次のステージへ進むまで
-type StageStep = "intro" | "waves" | "clearing" | "warning" | "boss" | "stage-clear";
+// boss: ボス戦 / stage-clear: ボスを倒して次のステージへ進むまで /
+// bonus-intro: 「BONUS STAGE」表示 / bonus: ボーナスステージ / bonus-end: 残ったザコがいなくなるのを待ってクリアへ
+type StageStep = "intro" | "waves" | "clearing" | "warning" | "boss" | "stage-clear" | "bonus-intro" | "bonus" | "bonus-end";
 
 // 敵の弾の色。背景がチーズ色なので黄色系は避け、白い縁取りで目立たせる
 const BULLET_PINK = "#ff6f91";
@@ -586,10 +595,12 @@ export class ShootingEngine {
   // 開発用に、途中のステージや強い攻撃レベルから始められる(ふつうはSTAGE 1・レベル1)。
   // 途中から始めた回はハイスコアに残さない
   startGame(options: StartOptions = {}): void {
-    const stageIndex = clamp(Math.floor(options.stageIndex ?? 0), 0, STAGES.length - 1);
+    const requestedStage = Math.floor(options.stageIndex ?? 0);
+    const bonus = requestedStage >= STAGES.length; // ボーナスステージは最後のステージの続きとして進める
+    const stageIndex = clamp(requestedStage, 0, STAGES.length - 1);
     const shotLevel = clamp(Math.floor(options.shotLevel ?? 1), 1, MAX_SHOT_LEVEL);
-    this.skipWaves = options.startAtBoss ?? false;
-    this.practice = stageIndex !== 0 || shotLevel !== 1 || this.skipWaves;
+    this.skipWaves = !bonus && (options.startAtBoss ?? false);
+    this.practice = requestedStage !== 0 || shotLevel !== 1 || this.skipWaves;
     this.phase = "playing";
     this.sound.playJingle("intro");
     this.score = 0;
@@ -609,7 +620,7 @@ export class ShootingEngine {
     this.shockwaveCooldownMs = SHOCKWAVE_INTERVAL_MS;
     this.miniAngle = 0;
     this.snapMinis();
-    this.stageStep = "intro";
+    this.stageStep = bonus ? "bonus-intro" : "intro";
     this.timedStarsDropped = 0;
     this.stepMs = 0;
     this.spawnCooldownMs = 0;
@@ -681,6 +692,7 @@ export class ShootingEngine {
     if (this.phase !== "playing") return null;
     if (this.stageStep === "intro") return `STAGE ${this.stageIndex + 1}`;
     if (this.stageStep === "stage-clear") return "STAGE CLEAR!";
+    if (this.stageStep === "bonus-intro") return "BONUS STAGE";
     return null;
   }
 
@@ -1059,7 +1071,11 @@ export class ShootingEngine {
         }
         break;
       case "stage-clear":
-        if (this.stepMs >= STAGE_CLEAR_MS) {
+        if (this.stepMs >= STAGE_CLEAR_MS && this.isFinalStage()) {
+          this.bosses = [];
+          this.setStageStep("bonus-intro");
+          this.sound.playJingle("intro");
+        } else if (this.stepMs >= STAGE_CLEAR_MS) {
           this.bosses = [];
           this.stageIndex += 1;
           this.timedStarsDropped = 0;
@@ -1067,6 +1083,52 @@ export class ShootingEngine {
           this.sound.playJingle("intro");
         }
         break;
+      case "bonus-intro":
+        if (this.stepMs >= STAGE_INTRO_MS) {
+          this.spawnCooldownMs = 0;
+          this.sound.playBgm(STAGE_BGM[0]);
+          this.setStageStep("bonus");
+        }
+        break;
+      case "bonus":
+        this.spawnCooldownMs -= dtMs;
+        if (this.spawnCooldownMs <= 0) {
+          this.spawnCooldownMs = randomBetween(BONUS_ROW_INTERVAL_MS);
+          this.spawnBonusRow();
+        }
+        if (this.stepMs >= BONUS_MS) this.setStageStep("bonus-end");
+        break;
+      case "bonus-end":
+        if (this.enemies.length === 0 || this.stepMs > BONUS_END_WAIT_MS) {
+          this.ending = { result: "clear", remainingMs: BOSS_DYING_MS };
+          this.sound.stopMusic(0.2);
+        }
+        break;
+    }
+  }
+
+  // ボーナスステージ: 一列に並んだ群れが、上・下・左・右のどれかから入ってきて、反対側へ横切っていく
+  private spawnBonusRow(): void {
+    const count = Math.round(randomBetween(BONUS_ROW_COUNT));
+    const speed = randomBetween(BONUS_SPEED);
+    const side = pickRandom(["top", "bottom", "left", "right"] as const);
+    const vertical = side === "top" || side === "bottom";
+    // 上下から来る群れは横一列、左右から来る群れは縦一列に並べる
+    const span = vertical ? FIELD_W - 60 : this.fieldH * 0.8;
+    const gap = span / count;
+    for (let i = 0; i < count; i++) {
+      const along = (vertical ? 30 : this.fieldH * 0.1) + gap * (i + 0.5) + (Math.random() - 0.5) * gap * 0.4;
+      const depth = 50 + Math.random() * 30; // 画面の外の、入ってくる手前の位置
+      const e = this.spawnEnemy("bonus", 0, 0);
+      if (!e) continue;
+      e.hp = BONUS_ENEMY_HP;
+      // 揺れる前の通り道の位置を(baseX, orbitCy)に持ち、そこから進む向きと直角に揺らす
+      e.baseX = vertical ? along : side === "left" ? -depth : FIELD_W + depth;
+      e.orbitCy = !vertical ? along : side === "top" ? -depth : this.fieldH + depth;
+      e.vx = side === "left" ? speed : side === "right" ? -speed : 0;
+      e.vy = side === "top" ? speed : side === "bottom" ? -speed : 0;
+      e.x = e.baseX;
+      e.y = e.orbitCy;
     }
   }
 
@@ -1387,6 +1449,16 @@ export class ShootingEngine {
         case "guard":
           this.updateGuard(e, dt);
           continue; // ガードは弾を撃たず、ボスを守るだけ
+        case "bonus": {
+          // ボーナスステージのザコは、ゆらゆら揺れながら横切っていくだけで弾を撃たない
+          e.baseX += e.vx * dt;
+          e.orbitCy += e.vy * dt;
+          const sway = Math.sin((e.ageMs / 1000) * 1.8) * 16;
+          const speed = Math.hypot(e.vx, e.vy) || 1;
+          e.x = e.baseX + (-e.vy / speed) * sway;
+          e.y = e.orbitCy + (e.vx / speed) * sway;
+          continue;
+        }
         default:
           e.vy += e.ay * dt;
           e.x += e.vx * dt;
@@ -1406,6 +1478,7 @@ export class ShootingEngine {
     this.enemies = this.enemies.filter((e) => {
       if (e.dyingMs !== null) return e.dyingMs < ENEMY_DYING_MS;
       if (e.kind === "guard") return true; // ボスについて画面の端近くまで行くことがあるが、倒されるまで残す
+      if (e.kind === "bonus") return e.y < this.fieldH + 200 && e.y > -200 && e.x > -140 && e.x < FIELD_W + 140; // 下から入ってくるものもいる
       return e.y < this.fieldH + e.h && e.y > -200 && e.x > -140 && e.x < FIELD_W + 140;
     });
   }
@@ -1985,7 +2058,7 @@ export class ShootingEngine {
       (e) => e.kind === "laser" && e.dyingMs === null && e.laserStep === "fire" && circleIntersectsRect(this.playerX, this.playerY, PLAYER_HIT_RADIUS, this.laserRect(e)),
     );
     const hitByBody =
-      this.enemies.some((e) => e.dyingMs === null && circleIntersectsRect(this.playerX, this.playerY, PLAYER_HIT_RADIUS, this.hitbox(e.x, e.y, e.w, e.h))) ||
+      this.enemies.some((e) => e.dyingMs === null && e.kind !== "bonus" && circleIntersectsRect(this.playerX, this.playerY, PLAYER_HIT_RADIUS, this.hitbox(e.x, e.y, e.w, e.h))) ||
       this.bosses.some((b) => b.step === "fighting" && circleIntersectsRect(this.playerX, this.playerY, PLAYER_HIT_RADIUS, this.hitbox(b.x, b.y, b.w, b.h)));
     if (hitByBullet || hitByLaser || hitByBody) this.onPlayerHit();
   }
@@ -2070,10 +2143,11 @@ export class ShootingEngine {
   private onEnemyDefeated(e: Enemy): void {
     e.dyingMs = 0;
     this.sound.playSfx("defeat");
-    const score = e.kind === "tank" ? TANK_SCORE : ENEMY_SCORE;
+    const score = e.kind === "tank" ? TANK_SCORE : e.kind === "bonus" ? BONUS_ENEMY_SCORE : ENEMY_SCORE;
     this.score += score;
     this.burst(e.x, e.y, e.kind === "tank" ? 24 : 12, 160);
     this.addText(e.x, e.y - e.h / 2, `+${score}`);
+    if (e.kind === "bonus") return; // ボーナスステージのザコはアイテムを落とさない
     // 決まったタイミングの星が出る番なら必ず星を落とす。そうでなければライフを先に抽選し、
     // 出なかった時だけパワーアップを抽選する(1体から2つは落とさない)。確率はどちらも[ザコ戦, ボス戦中]の組で持っている
     const config = this.stageConfig();
@@ -2117,13 +2191,9 @@ export class ShootingEngine {
     this.enemies.filter((e) => e.dyingMs === null).forEach((e) => this.burst(e.x, e.y, 10, 140));
     this.enemies = [];
     this.pendingSpawns = [];
-    if (isFinal) {
-      this.ending = { result: "clear", remainingMs: BOSS_DYING_MS };
-      this.sound.stopMusic(0.2);
-    } else {
-      this.setStageStep("stage-clear");
-      this.sound.playJingle("warp");
-    }
+    // 最後のステージでも、クリアの前にボーナスステージへ進む
+    this.setStageStep("stage-clear");
+    this.sound.playJingle("warp");
   }
 
   private onPlayerHit(): void {

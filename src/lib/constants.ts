@@ -214,6 +214,17 @@ export const STAGES: StageConfig[] = [
 export const STAGE_INTRO_MS = 2200; // ステージの始めに「STAGE 1」などを出している時間(この間はザコが出ない)
 export const STAGE_CLEAR_MS = 2800; // ボスを倒してから次のステージに進むまで(ボスが爆発する演出を含む)
 
+// ---- ボーナスステージ ----
+// 最後のステージのボスを倒した後、攻撃してこない(弾を撃たず、体に当たってもやられない)硬いザコが大量に押し寄せてくる
+// 上下左右のどこかから、一列に並んだ群れが反対側へ横切っていく
+export const BONUS_MS = 30000; // ザコが押し寄せてくる時間
+export const BONUS_ENEMY_HP = 20;
+export const BONUS_ENEMY_SCORE = 200;
+export const BONUS_ROW_INTERVAL_MS: [number, number] = [300, 550]; // 群れが出てくる間隔(ランダム)
+export const BONUS_ROW_COUNT: [number, number] = [5, 7]; // 1列に並ぶ数(ランダム)
+export const BONUS_SPEED: [number, number] = [70, 125]; // 進む速さ(px/秒。群れごとにランダム)
+export const BONUS_END_WAIT_MS = 5000; // 押し寄せ終えてから、残ったザコがいなくなるのを待つ最大の時間
+
 // ---- ボス(でかひなこ) ----
 export const BOSS_HEIGHT = 190;
 export const TWIN_BOSS_HEIGHT = 125; // 2体で出てくる中くらいのボスの高さ
