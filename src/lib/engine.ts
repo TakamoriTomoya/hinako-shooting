@@ -1062,7 +1062,8 @@ export class ShootingEngine {
       case "boss":
         this.updateGuards(dtMs, config.bossGuards);
         // ボスと戦っている間も、倒すまでずっとザコが出てくる(ハートを落としやすいザコ)
-        if (this.bosses.some((b) => b.step === "entering" || b.step === "fighting")) {
+        // 十字砲火の間は新しいザコを出さない(終わった後にまとめて突っ込んでこないように)
+        if (this.bosses.some((b) => b.step === "entering" || b.step === "fighting") && !this.isCrossfiring()) {
           this.spawnCooldownMs -= dtMs;
           if (this.spawnCooldownMs <= 0) {
             this.spawnCooldownMs = randomBetween(config.bossMinionIntervalMs);
@@ -1469,7 +1470,7 @@ export class ShootingEngine {
       if (e.fireCooldownMs <= 0) {
         e.fireCooldownMs = randomBetween(this.stageConfig().enemyFireIntervalMs);
         const onScreen = e.y > 20 && e.y < this.fieldH * ENEMY_FIRE_MAX_Y_RATIO && e.x > 0 && e.x < FIELD_W;
-        if (onScreen && this.playerAlive && e.diveStep !== "dive") {
+        if (onScreen && this.playerAlive && e.diveStep !== "dive" && !this.isCrossfiring()) {
           this.fireEnemyBullet(e.x, e.y + e.h * 0.2, aimAngle(e.x, e.y, this.playerX, this.playerY), this.stageConfig().enemyBulletSpeed, BEAM_RED, 6);
         }
       }
@@ -1526,7 +1527,7 @@ export class ShootingEngine {
     e.fireCooldownMs -= dtMs;
     if (e.fireCooldownMs <= 0) {
       e.fireCooldownMs = BEAMER_CHARGE_MS + randomBetween(this.stageConfig().enemyFireIntervalMs);
-      if (this.playerAlive && e.ageMs < BEAMER_STAY_MS) {
+      if (this.playerAlive && e.ageMs < BEAMER_STAY_MS && !this.isCrossfiring()) {
         e.beamLeft = e.beamShots;
         e.beamGapMs = 0;
         e.beamAngle = aimAngle(e.x, e.y, this.playerX, this.playerY);
@@ -1543,7 +1544,7 @@ export class ShootingEngine {
     e.laserMs += dtMs;
     switch (e.laserStep) {
       case "wait":
-        if (e.laserMs >= LASER_WAIT_MS && this.playerAlive) {
+        if (e.laserMs >= LASER_WAIT_MS && this.playerAlive && !this.isCrossfiring()) {
           e.laserStep = "charge";
           e.laserMs = 0;
           this.sound.playSfx("laserCharge");
@@ -1639,7 +1640,8 @@ export class ShootingEngine {
         // 少し震えて「来るぞ」と知らせてから、その時の自機の位置めがけて突っ込む
         e.divePauseMs += dtMs;
         e.x = e.baseX + Math.sin(e.divePauseMs / 25) * 2;
-        if (e.divePauseMs >= 650) {
+        // 十字砲火の間は、震えたまま待って突っ込まない
+        if (e.divePauseMs >= 650 && !this.isCrossfiring()) {
           const angle = aimAngle(e.x, e.y, this.playerX, this.playerY);
           e.vx = Math.cos(angle) * 270;
           e.vy = Math.sin(angle) * 270;
@@ -1828,6 +1830,11 @@ export class ShootingEngine {
         this.fireEnemyBullet(boss.x, muzzleY, angle, (alone ? 200 : 170) * config.bossBulletSpeedScale, BEAM_RED, 6);
       }
     }
+  }
+
+  // twinの2体が十字砲火をしている(光をためている・撃っている)か。この間、ザコは攻撃してこない
+  private isCrossfiring(): boolean {
+    return this.crossfire.step !== "idle" && this.bosses.filter((b) => b.kind === "twin" && b.step === "fighting").length >= 2;
   }
 
   // twinの相方が倒れて、1体だけ残っているか
