@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+@theme {
+  --font-heading: "Baloo 2", "M PLUS Rounded 1c", sans-serif; /* 英数字はBaloo 2、日本語は丸ゴシック */
+  --font-body: "Nunito", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+
+  /* 背景 */
+  --color-bg-outer: #f2efe6;
+  --color-bg-cream: #fffbf0;
+  --color-bg-yellow-grad: #fff6d9;
+  --color-bg-battle: #eff8ff;
+  /* 宇宙の背景(上ほど深く、下へ行くほど紫がかる) */
+  --color-space-top: #070b24;
+  --color-space-mid: #141040;
+  --color-space-bottom: #251449;
+  /* 白い文字のふち取り。暗い宇宙の背景でも文字の形が崩れて見えないよう濃い紺にする */
+  --color-outline: #1b1450;
+
+  /* ボタン */
+  --color-primary: #ff6f91;
+  --color-primary-hover: #ff8aa6;
+  --color-primary-shadow: #d94f6e;
+  --color-secondary: #ffc93c;
+  --color-secondary-hover: #ffd666;
+  --color-secondary-shadow: #d9a81e;
+  /* ホームの対戦ボタン(緑系。ひとりで挑戦は濃い緑、オンラインは黄緑) */
+  --color-green: #34a853;
+  --color-green-hover: #47b866;
+  --color-green-shadow: #23803d;
+  --color-lime: #8cc63f;
+  --color-lime-hover: #9bd150;
+  --color-lime-shadow: #6a9a2a;
+  --color-ghost-bg: #eaf7ee;
+  --color-ghost-hover: #d9f2e0;
+  --color-ghost-text: #2fb870;
+  --color-ghost-shadow: #cdebd6;
+
+  /* テキスト */
+  --color-text-dark: #4a4237;
+  --color-text-light: #8a8168;
+
+  /* プレイヤーチップ */
+  --color-p1-bg: #ffe1ea;
+  --color-p1-text: #d9436b;
+  --color-p2-bg: #e1f0ff;
+  --color-p2-text: #1e80c9;
+
+  /* 画像枠 */
+  --color-frame-yellow: #ffe7a3;
+}
+
+@layer base {
+  body {
+    @apply m-0 flex justify-center bg-bg-outer text-text-dark font-body;
+  }
+
+  /* bodyのdisplay:flexの子として幅がshrink-to-fitになり、
+     width:100%指定の子孫が0幅に潰れてしまうため明示する */
+  #root {
+    @apply w-full;
+  }
+}
+
+/* 宇宙の背景の上に置く白文字(フクロ文字)用 */
+.text-outline {
+  /* 円周上に影を細かく並べて、角のない丸い縁取りにする */
+  text-shadow:
+    1.00px 0.00px 0 var(--color-outline),
+    0.71px 0.71px 0 var(--color-outline),
+    0.00px 1.00px 0 var(--color-outline),
+    -0.71px 0.71px 0 var(--color-outline),
+    -1.00px 0.00px 0 var(--color-outline),
+    -0.71px -0.71px 0 var(--color-outline),
+    0.00px -1.00px 0 var(--color-outline),
+    0.71px -0.71px 0 var(--color-outline),
+    2.00px 0.00px 0 var(--color-outline),
+    1.85px 0.77px 0 var(--color-outline),
+    1.41px 1.41px 0 var(--color-outline),
+    0.77px 1.85px 0 var(--color-outline),
+    0.00px 2.00px 0 var(--color-outline),
+    -0.77px 1.85px 0 var(--color-outline),
+    -1.41px 1.41px 0 var(--color-outline),
+    -1.85px 0.77px 0 var(--color-outline),
+    -2.00px 0.00px 0 var(--color-outline),
+    -1.85px -0.77px 0 var(--color-outline),
+    -1.41px -1.41px 0 var(--color-outline),
+    -0.77px -1.85px 0 var(--color-outline),
+    0.00px -2.00px 0 var(--color-outline),
+    0.77px -1.85px 0 var(--color-outline),
+    1.41px -1.41px 0 var(--color-outline),
+    1.85px -0.77px 0 var(--color-outline),
+    2.50px 0.00px 0 var(--color-outline),
+    2.31px 0.96px 0 var(--color-outline),
+    1.77px 1.77px 0 var(--color-outline),
+    0.96px 2.31px 0 var(--color-outline),
+    0.00px 2.50px 0 var(--color-outline),
+    -0.96px 2.31px 0 var(--color-outline),
+    -1.77px 1.77px 0 var(--color-outline),
+    -2.31px 0.96px 0 var(--color-outline),
+    -2.50px 0.00px 0 var(--color-outline),
+    -2.31px -0.96px 0 var(--color-outline),
+    -1.77px -1.77px 0 var(--color-outline),
+    -0.96px -2.31px 0 var(--color-outline),
+    0.00px -2.50px 0 var(--color-outline),
+    0.96px -2.31px 0 var(--color-outline),
+    1.77px -1.77px 0 var(--color-outline),
+    2.31px -0.96px 0 var(--color-outline);
+}
+
+/* ゲーム画面の背景: 宇宙。星や惑星はcanvas側で描き、ここでは奥の色と星雲のにじみだけを敷く */
+.bg-space {
+  background-color: var(--color-space-top);
+  background-image:
+    radial-gradient(ellipse 60% 40% at 15% 20%, rgba(155, 93, 229, 0.3), transparent 70%),
+    radial-gradient(ellipse 50% 35% at 85% 65%, rgba(63, 167, 255, 0.22), transparent 70%),
+    radial-gradient(ellipse 55% 30% at 50% 105%, rgba(255, 111, 145, 0.22), transparent 70%),
+    linear-gradient(180deg, var(--color-space-top) 0%, var(--color-space-mid) 55%, var(--color-space-bottom) 100%);
+}
