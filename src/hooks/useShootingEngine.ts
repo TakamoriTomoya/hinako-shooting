@@ -15,8 +15,7 @@ export function useShootingEngine() {
     shotLevel: 1,
     stage: 1,
     stageBanner: null,
-    bossName: "",
-    bossHpPercent: null,
+    bossHps: null,
     bossWarning: false,
     hintVisible: false,
     highScore: 0,
@@ -42,7 +41,7 @@ export function useShootingEngine() {
   }, []);
 
   // 開発用のスタート設定(ステージ・攻撃レベル)。結果画面の「もう一度」でも同じ設定で始める
-  const [devStart, setDevStart] = useState<Required<StartOptions>>({ stageIndex: 0, shotLevel: 1 });
+  const [devStart, setDevStart] = useState<Required<StartOptions>>({ stageIndex: 0, shotLevel: 1, startAtBoss: false });
   const startGame = useCallback(() => engineRef.current?.startGame(DEV_TOOLS ? devStart : {}), [devStart]);
   const goHome = useCallback(() => engineRef.current?.goHome(), []);
   const toggleMuted = useCallback(() => {

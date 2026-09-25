@@ -18,8 +18,7 @@ function App() {
             stageBanner: state.stageBanner,
             score: state.score,
             lives: state.lives,
-            bossName: state.bossName,
-            bossHpPercent: state.bossHpPercent,
+            bossHps: state.bossHps,
             bossWarning: state.bossWarning,
             hintVisible: state.hintVisible,
           })

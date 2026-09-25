@@ -25,6 +25,7 @@ import {
   ENEMY_FIRST_FIRE_MS,
   ENEMY_HEIGHT,
   ENEMY_SCORE,
+  TANK_SCORE,
   ENEMY_SIZE_SCALE_MAX,
   ENEMY_SIZE_SCALE_MIN,
   FIELD_MAX_H,
@@ -39,6 +40,10 @@ import {
   LIFE_ITEM_FULL_SCORE,
   LIFE_BONUS_SCORE,
   MAX_SHOT_LEVEL,
+  SHOCKWAVE_DAMAGE,
+  SHOCKWAVE_INTERVAL_MS,
+  SHOCKWAVE_LEVEL,
+  SHOCKWAVE_SPEED,
   HEAVY_SHOT_SPEED,
   HEAVY_SHOTS,
   MINI_CONTACT_DPS,
@@ -46,8 +51,14 @@ import {
   MINI_HIT_RADIUS,
   MINI_ORBIT_RADIUS,
   MINI_ORBIT_SPEED,
-  SIDE_SHOT_INTERVAL_MS,
-  SIDE_SHOT_LEVEL,
+  OMNI_SHOT_COUNT,
+  OMNI_SHOT_DAMAGE,
+  OMNI_SHOT_INTERVAL_MS,
+  OMNI_SHOT_LEVEL,
+  OMNI_SHOT_SCALE,
+  OUTER_MINI_LEVEL,
+  OUTER_MINI_ORBIT_RADIUS,
+  OUTER_MINI_ORBIT_SPEED,
   PLAYER_BOTTOM_MARGIN,
   PLAYER_EDGE_MARGIN,
   PLAYER_HIT_RADIUS,
@@ -63,6 +74,7 @@ import {
   STAGE_CLEAR_MS,
   STAGE_INTRO_MS,
   STAGES,
+  type FormationName,
   type StageConfig,
 } from "./constants";
 import { aimAngle, circleIntersectsRect, circlesIntersect, clamp, fanAngles, spawnInterval, type Rect } from "./collision";
@@ -72,6 +84,11 @@ import { loadSprites, spriteWidthFor, SPRITE_OUTLINE_PX, type Sprite } from "./s
 
 export type EnginePhase = "home" | "playing" | "gameover" | "clear";
 
+export interface BossHp {
+  name: string;
+  percent: number; // 0〜100
+}
+
 export interface EngineState {
   phase: EnginePhase;
   score: number;
@@ -79,8 +96,7 @@ export interface EngineState {
   shotLevel: number;
   stage: number; // 今のステージ(1から)
   stageBanner: string | null; // 画面中央に大きく出す「STAGE 2」「STAGE CLEAR!」。出していない時はnull
-  bossName: string; // ボス戦中だけ中身がある
-  bossHpPercent: number | null; // ボス戦中だけ0〜100、それ以外はnull
+  bossHps: BossHp[] | null; // ボス戦中だけ、ボス1体につき1つ(2体の時は左から順)。それ以外はnull
   bossWarning: boolean; // 「WARNING」を出している間true
   hintVisible: boolean; // 始めてから最初に自機を動かすまで、操作方法を出しておく
   highScore: number;
@@ -93,9 +109,10 @@ export type EngineStateListener = (state: EngineState) => void;
 export interface StartOptions {
   stageIndex?: number; // 始めるステージ(0から)
   shotLevel?: number; // 始める時の攻撃レベル(1〜MAX_SHOT_LEVEL)
+  startAtBoss?: boolean; // 最初のステージをザコ戦を飛ばしてボス戦から始める
 }
 
-type EnemyKind = "straight" | "zigzag" | "swoop" | "dive" | "beamer" | "laser" | "cross" | "guard";
+type EnemyKind = "straight" | "zigzag" | "swoop" | "dive" | "beamer" | "laser" | "cross" | "guard" | "tank" | "orbit";
 
 interface Enemy {
   sprite: Sprite;
@@ -115,16 +132,18 @@ interface Enemy {
   dyingMs: number | null; // 倒された後、消えるまでの演出の経過時間
   diveStep: "enter" | "pause" | "dive";
   diveStopY: number; // dive・beamer・laserが止まる高さ。crossは横切っていく高さ
+  diveFromSide: boolean; // dive・beamerが横から入ってくるか(横から入ってきたものはbaseXの位置で止まり、beamerは横へ帰っていく)
   divePauseMs: number;
   beamShots: number; // beamerが1回に撃つ数(1発だけのものと、3連射のものがいる)
   beamLeft: number; // beamerの連射で、あと何発撃つか
   beamGapMs: number; // beamerの連射で、次の1発までの残り時間
   beamAngle: number; // beamerの連射の向き(撃ち始めに自機をねらって決め、連射の間は変えない)
-  laserStep: "wait" | "charge" | "fire"; // laserの状態: 待つ → ためる(予告の細い線) → まっすぐ下へ撃ち続ける
+  laserStep: "wait" | "charge" | "fire" | "done"; // laserの状態: 待つ → ためる(予告の細い線) → まっすぐ下へ撃つ → 撃ち終わって上へ帰っていく
   laserMs: number; // 今のlaserStepに入ってからの経過時間
   laserLen: number; // 口元から伸びているレーザーの長さ
   guardOf: Boss | null; // guardが守っているボス
-  orbitAngle: number; // guardがボスのまわりを回っている角度
+  orbitAngle: number; // guardがボスのまわりを回っている角度。orbitが輪の中心のまわりを回っている角度
+  orbitCy: number; // orbitの輪の中心の高さ(中心の横の位置はbaseX)
 }
 
 type BossStep = "entering" | "fighting" | "dying";
@@ -140,14 +159,13 @@ interface Boss {
   h: number;
   hp: number;
   maxHp: number;
-  homeX: number; // 戦っている間の基準の位置(twinRushは突っ込んだ後ここへ戻る)
+  homeX: number; // 戦っている間の基準の位置(bigRushは突っ込んだ後ここへ戻る)
   homeY: number;
-  rushStep: "hover" | "windup" | "rush" | "return"; // twinRush・bigRushの動き: 浮かぶ → 震えてためる → 突っ込む → 戻る
+  rushStep: "hover" | "windup" | "rush" | "return"; // bigRushの動き: 浮かぶ → 震えてためる → 突っ込む → 戻る
   rushMs: number; // 今のrushStepに入ってからの経過時間
   rushVx: number;
   rushVy: number;
-  hoverMs: number; // 今回、浮かんでから突っ込み始めるまでの時間(twinRushは毎回ランダム)
-  wanderX: number; // twinRushが浮かんでいる間に向かっている場所(ときどき不規則に選び直す)
+  wanderX: number; // twinが向かっている場所(ときどき不規則に選び直す)
   wanderY: number;
   wanderMs: number; // 次に向かう場所を選び直すまでの残り時間
   wanderEase: number; // 向かう場所へ寄っていく速さ(選び直すたびにランダム)
@@ -159,6 +177,11 @@ interface Boss {
   spinAngle: number; // ringとspiralで撃つ向きを少しずつずらすための角度
   flashMs: number;
   nextBlastMs: number; // 倒された後の爆発演出の間隔
+  barrierHp: number; // 張っているバリアの残りHP(0なら張っていない)
+  barrierMaxHp: number;
+  barrierMs: number; // バリアを張ってからの時間(広がっていく演出用)
+  barrierCooldownMs: number; // 次にバリアを張るまでの残り時間
+  barrierFlashMs: number; // バリアに弾が当たって光っている残り時間
 }
 
 interface Bullet {
@@ -171,7 +194,7 @@ interface Bullet {
   look: "beam" | "shot"; // beamは敵のビーム、shotは自機の弾
   damage?: number; // 自機の弾が敵に与えるダメージ(省略時は1)。強い弾だけ大きい
   scale?: number; // 自機の弾の見た目の大きさ(省略時は1)
-  blast?: { radius: number; damage: number }; // 当たると爆発して、まわりのザコにもダメージを与える(レベル6の強い弾)
+  blast?: { radius: number; damage: number }; // 当たると爆発して、まわりのザコにもダメージを与える(レベル6以上の強い弾)
 }
 
 type ItemKind = "power" | "life";
@@ -209,20 +232,38 @@ type StageStep = "intro" | "waves" | "clearing" | "warning" | "boss" | "stage-cl
 const BULLET_PINK = "#ff6f91";
 // 敵のビームの色(撃ち方ごとに見分けられるように変える)
 const BEAM_RED = "#ff3030";
-// twinRush(2体で突っ込んでくる中くらいのボス)の動き
+// twin(2体で出てくる中くらいのボス)の動き
 const TWIN_REST_Y = 130; // 浮かんでいる高さ
-const TWIN_HOVER_MS: [number, number] = [1500, 3500]; // 浮かんでから突っ込み始めるまで。毎回ランダム(HPが半分を切ると短くなる)
-const TWIN_WANDER_MS: [number, number] = [400, 1300]; // 浮かんでいる間、向かう場所を選び直す間隔(ランダム)
-const TWIN_WANDER_Y: [number, number] = [90, 240]; // 浮かんでいる間に動き回る高さの範囲
-const TWIN_WINDUP_MS = 600; // 突っ込む前に震えて知らせる時間
-const TWIN_RUSH_SPEED = 170; // 迫ってくる速さ(px/秒)。出始めはこの半分から、だんだん速くなる
-const TWIN_RUSH_MAX_MS = 3000; // 迫ってくるのをやめて戻り始めるまで(画面の端に着いたらその時点で戻る)
-const RUSH_TURN_RATE = 1.4; // 迫っている間に、自機の方へ向きを変えられる速さ(rad/秒)
-const TWIN_RETURN_SPEED = 260; // 元の位置へ戻る速さ(px/秒)
-const TWIN_FIRE_MS = 1900; // 浮かんでいる間に3方向の弾を撃つ間隔(弾は少なめ)
-// bigRush(弾を撃ちつつ体当たりしてくる大きなボス)。震える時間・戻る速さはtwinRushと同じ
+const TWIN_WANDER_MS: [number, number] = [400, 1300]; // 向かう場所を選び直す間隔(ランダム)
+const TWIN_WANDER_Y: [number, number] = [90, 240]; // 動き回る高さの範囲
+const TWIN_FIRE_MS = 1900; // 3方向の弾を撃つ間隔(弾は少なめ)
+// ボスのバリア(STAGESのbossBarrier)
+const BARRIER_FIRST_MS = 5000; // ボスが戦い始めてから、最初にバリアを張るまで
+const BARRIER_RADIUS_SCALE = 0.62; // ボスの体の大きさ(幅と高さの大きい方)に対するバリアの半径
+const BARRIER_COLOR = "#20d8ff";
+
+// 2体の十字砲火。2体が左右対称の位置にそろって光をためてから、同時に斜め下へ弾を連射する。
+// 撃つ向きを左右対称に振るので、2体の弾がX字に交差して、そのすき間が上下に動く
+const CROSSFIRE_FIRST_MS = 3000; // 2体が戦い始めてから、最初に撃つまで
+const CROSSFIRE_INTERVAL_MS: [number, number] = [6000, 8000]; // 撃ち終えてから、次に撃つまで(ランダム)
+const CROSSFIRE_CHARGE_MS = 800; // 左右対称の位置へ動いて、光をためる時間(予告)
+const CROSSFIRE_FIRE_MS = 2600; // 連射している時間(この間に撃つ向きを1往復振る)
+const CROSSFIRE_SHOT_MS = 110; // 連射の間隔
+const CROSSFIRE_SPOT: [number, number] = [0.2, 115]; // 撃つ位置。[画面の幅に対する左の1体の横の位置(右の1体は反対側), 高さ(px)]
+const CROSSFIRE_SWEEP = 0.45; // 撃つ向きを振る幅(rad)
+const CROSSFIRE_SPREAD = 0.32; // 1回に撃つ2発の開き(rad)
+// 1体が倒れて残った1体は怒る: 画面の上の方全体を速く動き回り、5方向の弾をたくさん撃つ
+const TWIN_ALONE_FIRE_SCALE = 0.55; // 撃つ間隔の倍率
+// bigRush(弾を撃ちつつ体当たりしてくる大きなボス)の動き
 const BIG_RUSH_HOVER_MS = 4200; // 弾を撃ちながら浮かんでから、体当たりを始めるまで(HPが半分を切ると短くなる)
-const BIG_RUSH_SPEED = 130; // 体が大きいぶん、さらにゆっくり迫ってくる
+const RUSH_WINDUP_MS = 600; // 突っ込む前に震えて知らせる時間
+const BIG_RUSH_SPEED = 130; // 迫ってくる速さ(px/秒)。出始めはこの半分から、だんだん速くなる
+const RUSH_MAX_MS = 3000; // 迫ってくるのをやめて戻り始めるまで(画面の端に着いたらその時点で戻る)
+const RUSH_TURN_RATE = 1.4; // 迫っている間に、自機の方へ向きを変えられる速さ(rad/秒)
+const RUSH_RETURN_SPEED = 260; // 元の位置へ戻る速さ(px/秒)
+
+const SIDE_DIVE_ENTER_SPEED = 220; // 横から入ってくるdive・beamerの速さ(px/秒)
+const SIDE_BEAMER_Y: [number, number] = [0.5, 0.7]; // 左右の下の方から入ってくるbeamer・diveの高さ(画面の高さに対する割合)
 
 const BOSS_AURA = "#a23cff"; // ボスのオーラ(ふだん)
 const BOSS_AURA_ENRAGED = "#ff2a2a"; // ボスのオーラ(HPが半分を切って怒っている時)
@@ -267,7 +308,7 @@ function auraSprite(sprite: Sprite, color: string): HTMLCanvasElement | null {
 const BEAM_CYAN = "#20d8ff";
 const BEAM_GREEN = "#40ff70";
 const SHOT_NEON = "#ff3fd2"; // 自機の弾の蛍光ピンク(敵の弾と見まちがえない色)
-const HEAVY_SHOT_NEON = "#ff8a1f"; // 自機の強い弾(レベル4以上)の蛍光オレンジ
+const HEAVY_SHOT_NEON = "#ff8a1f"; // 自機の強い弾(レベル6以上)の蛍光オレンジ
 const BLAST_MS = 320; // 強い弾の爆発の演出の長さ
 
 // ビームを撃つザコ(beamer): 降りてきて止まり、光をためてから自機めがけて赤いビームを連射する
@@ -279,6 +320,17 @@ const BEAMER_STAY_MS = 6000; // 出てきてからこの時間が過ぎたら上
 const CROSS_SPEED = 140; // 横に進む速さ(px/秒)
 const CROSS_GAP_MS = 420; // 列の中で、1体ずつ出てくる間隔(速さ×間隔 = 並ぶ間隔 約60px)
 
+// 少し強いザコ(tank): ランダムな位置に1体、大きめの体でゆっくり降りてくる
+const TANK_SCALE = 1.3; // ふつうのザコに対する大きさ
+const TANK_HP_SCALE = 2; // ふつうのザコの何倍のHPか
+const TANK_SPEED = 50; // 降りてくる速さ(px/秒)
+
+// 輪になって回るザコ(orbit): orbitRingで6体が輪になり、回りながらゆっくり降りてくる
+const ORBIT_COUNT = 6;
+const ORBIT_RADIUS = 70;
+const ORBIT_SPEED = 1.6; // 回る速さ(rad/秒)
+const ORBIT_FALL_SPEED = 45; // 輪の中心が降りてくる速さ(px/秒)
+
 // ボスのガード(guard): STAGESのbossGuardsの数だけ、ボスのまわりを回って自機の弾をふせぐ
 const GUARD_ORBIT_SPEED = 1.1; // 回る速さ(rad/秒)
 const GUARD_ORBIT_GAP = 34; // ボスの体のふちから、回る道までの距離
@@ -286,11 +338,11 @@ const GUARD_SCALE = 0.8; // ふつうのザコに対する大きさ
 const GUARD_RESPAWN_MS = 6000; // 全部倒してから出し直すまで
 
 // レーザーを撃つザコ(laser): 降りてきてぴたっと止まり、口元から真下へ一直線にレーザーを伸ばす。
-// レーザーは倒されるか画面の外へ出ていくまで、ずっと口元から出たまま(帰っていく間も出ている)
+// レーザーはLASER_FIRE_MSのあいだ出して止め、上へ帰っていく
 const LASER_WAIT_MS = 500; // 止まってからためるまで
 const LASER_CHARGE_MS = 800; // ためる間、撃つ場所に細い線を出して予告する
 const LASER_EXTEND_SPEED = 900; // レーザーの先が伸びていく速さ(px/秒)
-const LASER_STAY_MS = 1200; // 撃ち始めてからこの時間が過ぎたら、レーザーを出したまま上へ帰っていく
+const LASER_FIRE_MS = 2000; // レーザーを出している時間
 const LASER_LEAVE_SPEED = 320; // 帰っていく速さ(px/秒)
 const LASER_HIT_W = 12; // 当たり判定の太さ
 const EXPLOSION_COLORS = ["#ff6f91", "#ffffff", "#ffc93c", "#8cc63f"];
@@ -436,10 +488,10 @@ export class ShootingEngine {
   private score = 0;
   private lives = PLAYER_START_LIVES;
   private shotLevel = 1;
-  private kills = 0;
   private highScore = loadHighScore();
   private isNewRecord = false;
   private practice = false; // 開発用に途中から始めた回(ハイスコアに残さない)
+  private skipWaves = false; // 開発用に、最初のステージのザコ戦を飛ばしてボス戦から始める
   private hintVisible = false;
 
   private playerX = FIELD_W / 2;
@@ -447,26 +499,35 @@ export class ShootingEngine {
   private playerAlive = true;
   private invincibleMs = 0;
   private shotCooldownMs = 0;
-  private heavyCooldownMs = 0; // オレンジの爆弾(レベル6)を次に撃つまでの残り時間
-  private sideCooldownMs = 0; // 真横に撃つ弾(レベル4以上)を次に撃つまでの残り時間
+  private heavyCooldownMs = 0; // オレンジの爆弾(レベル6以上)を次に撃つまでの残り時間
+  private omniCooldownMs = 0; // 全方向のビーム(レベル8)を次に撃つまでの残り時間
+  private omniRings = 0; // 撃った輪の数(1回ごとに向きを半分ずらして、すき間を埋めるため)
   private guardCooldownMs = 0; // ボスのガードを全部倒してから出し直すまでの残り時間
-  // ミニ戦闘機(レベル5以上)の位置。2機が自機をはさんで反対側にいて、まわりを回る
+  // ミニ戦闘機の位置。内側(レベル4以上)は2機が自機をはさんで反対側にいて、まわりを回る。
+  // 外側(レベル5以上)は3機が等間隔で、内側と反対向きに回る
   private miniAngle = 0;
   private minis = [
-    { x: 0, y: 0 },
-    { x: 0, y: 0 },
+    { x: 0, y: 0, outer: false },
+    { x: 0, y: 0, outer: false },
+    { x: 0, y: 0, outer: true },
+    { x: 0, y: 0, outer: true },
+    { x: 0, y: 0, outer: true },
   ];
   private blasts: { x: number; y: number; radius: number; ms: number }[] = []; // 強い弾の爆発の輪(演出)
+  private shockwaves: { x: number; y: number; r: number; maxR: number; hit: Set<Enemy> }[] = []; // レベル9の衝撃波の輪
+  private shockwaveCooldownMs = 0;
 
   private stageIndex = 0;
   private stageStep: StageStep = "intro";
   private usedBossSprites: Sprite[] = []; // 同じひなこが続けてボスにならないよう、この回で出したボス
   private stepMs = 0;
+  private timedStarsDropped = 0; // このステージで、決まったタイミングで落とした星の数(STAGESのpowerDropTimings)
   private spawnCooldownMs = 0;
   private pendingSpawns: { delayMs: number; spawn: () => void }[] = [];
 
   private enemies: Enemy[] = [];
-  private bosses: Boss[] = []; // ふつうは1体。twinRushのステージは2体
+  private bosses: Boss[] = []; // ふつうは1体。twinのステージは2体
+  private crossfire: { step: "idle" | "charge" | "fire"; ms: number; cooldownMs: number; shotMs: number } = { step: "idle", ms: 0, cooldownMs: 0, shotMs: 0 }; // twinの2体の十字砲火
   private playerShots: Bullet[] = [];
   private enemyBullets: Bullet[] = [];
   private items: Item[] = [];
@@ -527,13 +588,13 @@ export class ShootingEngine {
   startGame(options: StartOptions = {}): void {
     const stageIndex = clamp(Math.floor(options.stageIndex ?? 0), 0, STAGES.length - 1);
     const shotLevel = clamp(Math.floor(options.shotLevel ?? 1), 1, MAX_SHOT_LEVEL);
-    this.practice = stageIndex !== 0 || shotLevel !== 1;
+    this.skipWaves = options.startAtBoss ?? false;
+    this.practice = stageIndex !== 0 || shotLevel !== 1 || this.skipWaves;
     this.phase = "playing";
     this.sound.playJingle("intro");
     this.score = 0;
     this.lives = PLAYER_START_LIVES;
     this.shotLevel = shotLevel;
-    this.kills = 0;
     this.stageIndex = stageIndex;
     this.usedBossSprites = [];
     this.isNewRecord = false;
@@ -544,10 +605,12 @@ export class ShootingEngine {
     this.invincibleMs = 0;
     this.shotCooldownMs = 0;
     this.heavyCooldownMs = 0;
+    this.omniCooldownMs = 0;
+    this.shockwaveCooldownMs = SHOCKWAVE_INTERVAL_MS;
     this.miniAngle = 0;
-    this.sideCooldownMs = 0;
     this.snapMinis();
     this.stageStep = "intro";
+    this.timedStarsDropped = 0;
     this.stepMs = 0;
     this.spawnCooldownMs = 0;
     this.pendingSpawns = [];
@@ -558,6 +621,7 @@ export class ShootingEngine {
     this.items = [];
     this.particles = [];
     this.blasts = [];
+    this.shockwaves = [];
     this.texts = [];
     this.ending = null;
     this.drag = null;
@@ -574,6 +638,7 @@ export class ShootingEngine {
     this.items = [];
     this.particles = [];
     this.blasts = [];
+    this.shockwaves = [];
     this.texts = [];
     this.pendingSpawns = [];
     this.ending = null;
@@ -622,8 +687,6 @@ export class ShootingEngine {
   private emit(): void {
     const bosses = this.bosses;
     const showHp = bosses.length > 0 && bosses.every((b) => b.step !== "entering");
-    const hpLeft = bosses.reduce((sum, b) => sum + Math.max(0, b.hp), 0);
-    const hpMax = bosses.reduce((sum, b) => sum + b.maxHp, 0);
     const state: EngineState = {
       phase: this.phase,
       score: this.score,
@@ -631,8 +694,14 @@ export class ShootingEngine {
       shotLevel: this.shotLevel,
       stage: this.stageIndex + 1,
       stageBanner: this.stageBanner(),
-      bossName: bosses.map((b) => (b.kind === "twinRush" ? b.sprite.name : `でか${b.sprite.name}`)).join(" と "),
-      bossHpPercent: showHp ? Math.ceil((hpLeft / hpMax) * 100) : null, // 2体の時は合計の残り
+      bossHps: showHp
+        ? [...bosses]
+            .sort((a, b) => a.homeX - b.homeX)
+            .map((b) => ({
+              name: b.kind === "twin" ? b.sprite.name : `でか${b.sprite.name}`,
+              percent: Math.ceil((Math.max(0, b.hp) / b.maxHp) * 100),
+            }))
+        : null,
       bossWarning: this.stageStep === "warning" && this.phase === "playing",
       hintVisible: this.hintVisible && this.phase === "playing",
       highScore: this.highScore,
@@ -773,38 +842,93 @@ export class ShootingEngine {
         this.firePlayerShots();
         this.sound.playSfx("shot");
       }
-      const heavy = HEAVY_SHOTS[this.shotLevel];
+      // 今のレベル以下で、いちばん上のレベルの設定を使う(レベル8でもレベル7の爆弾を撃ち続けるように)
+      const heavyLevel = Math.max(0, ...Object.keys(HEAVY_SHOTS).map(Number).filter((l) => l <= this.shotLevel));
+      const heavy = HEAVY_SHOTS[heavyLevel];
       if (heavy) {
         this.heavyCooldownMs -= dtMs;
         if (this.heavyCooldownMs <= 0) {
           this.heavyCooldownMs = heavy.intervalMs;
-          this.playerShots.push({
-            x: this.playerX,
-            y: this.playerY - 26,
-            vx: 0,
-            vy: -HEAVY_SHOT_SPEED,
-            r: SHOT_RADIUS * heavy.scale,
-            color: HEAVY_SHOT_NEON,
-            look: "shot",
-            damage: heavy.damage,
-            scale: heavy.scale,
-            blast: heavy.blast,
-          });
+          // まっすぐ上に1発。sideSpreadがあれば、左右ななめ前にも1発ずつ
+          const angles = heavy.sideSpread ? [0, -heavy.sideSpread, heavy.sideSpread] : [0];
+          for (const a of angles) {
+            this.playerShots.push({
+              x: this.playerX,
+              y: this.playerY - 26,
+              vx: Math.sin(a) * HEAVY_SHOT_SPEED,
+              vy: -Math.cos(a) * HEAVY_SHOT_SPEED,
+              r: SHOT_RADIUS * heavy.scale,
+              color: HEAVY_SHOT_NEON,
+              look: "shot",
+              damage: heavy.damage,
+              scale: heavy.scale,
+              blast: heavy.blast,
+            });
+          }
           this.sound.playSfx("heavyShot");
         }
       }
-      if (this.shotLevel >= SIDE_SHOT_LEVEL) {
-        // 自機の両わきから、左右それぞれ真横に撃つ
-        this.sideCooldownMs -= dtMs;
-        if (this.sideCooldownMs <= 0) {
-          this.sideCooldownMs += SIDE_SHOT_INTERVAL_MS;
-          for (const side of [-1, 1]) {
-            this.playerShots.push({ x: this.playerX + side * 20, y: this.playerY + 6, vx: side * SHOT_SPEED * 0.8, vy: 0, r: SHOT_RADIUS, color: SHOT_NEON, look: "shot" });
-          }
-        }
+    }
+    if (this.shotLevel >= OMNI_SHOT_LEVEL && this.playerAlive && this.ending === null) {
+      this.omniCooldownMs -= dtMs;
+      if (this.omniCooldownMs <= 0) {
+        this.omniCooldownMs += OMNI_SHOT_INTERVAL_MS;
+        this.fireOmniShots();
       }
     }
+    if (this.shotLevel >= SHOCKWAVE_LEVEL && this.playerAlive && this.ending === null) {
+      this.shockwaveCooldownMs -= dtMs;
+      if (this.shockwaveCooldownMs <= 0) {
+        this.shockwaveCooldownMs += SHOCKWAVE_INTERVAL_MS;
+        // 画面のいちばん遠い角まで届いたら消える
+        const maxR = Math.hypot(Math.max(this.playerX, FIELD_W - this.playerX), Math.max(this.playerY, this.fieldH - this.playerY));
+        this.shockwaves.push({ x: this.playerX, y: this.playerY, r: 0, maxR, hit: new Set() });
+        this.sound.playSfx("blast");
+      }
+    }
+    this.updateShockwaves(dtMs);
     this.updateMinis(dtMs);
+  }
+
+  // レベル9の衝撃波: 輪が広がりながら、通ったところの敵の弾を消し、ザコに1回ずつダメージを与える(レーザー・ボスには効かない)
+  private updateShockwaves(dtMs: number): void {
+    for (const w of this.shockwaves) {
+      w.r += SHOCKWAVE_SPEED * (dtMs / 1000);
+      this.enemyBullets = this.enemyBullets.filter((b) => {
+        if ((b.x - w.x) ** 2 + (b.y - w.y) ** 2 > w.r * w.r) return true;
+        this.burst(b.x, b.y, 2, 60);
+        return false;
+      });
+      for (const e of this.enemies) {
+        if (e.dyingMs !== null || w.hit.has(e) || (e.x - w.x) ** 2 + (e.y - w.y) ** 2 > w.r * w.r) continue;
+        w.hit.add(e);
+        e.hp -= SHOCKWAVE_DAMAGE;
+        e.flashMs = HIT_FLASH_MS;
+        if (e.hp <= 0) this.onEnemyDefeated(e);
+      }
+    }
+    this.shockwaves = this.shockwaves.filter((w) => w.r < w.maxR);
+  }
+
+  // レベル8: 自機から全方向へ、弱いビームを輪のように撃つ。1回ごとに向きを半分ずらす
+  private fireOmniShots(): void {
+    const step = (Math.PI * 2) / OMNI_SHOT_COUNT;
+    const offset = (this.omniRings % 2) * (step / 2);
+    this.omniRings += 1;
+    for (let i = 0; i < OMNI_SHOT_COUNT; i++) {
+      const angle = offset + step * i;
+      this.playerShots.push({
+        x: this.playerX,
+        y: this.playerY,
+        vx: Math.cos(angle) * SHOT_SPEED,
+        vy: Math.sin(angle) * SHOT_SPEED,
+        r: SHOT_RADIUS * OMNI_SHOT_SCALE,
+        color: SHOT_NEON,
+        look: "shot",
+        damage: OMNI_SHOT_DAMAGE,
+        scale: OMNI_SHOT_SCALE,
+      });
+    }
   }
 
   // ミニ戦闘機は撃たずに、自機のまわりをぐるぐる回る。触れた敵の弾を消し、触れたザコにダメージを与える(ボスには効かない)
@@ -813,7 +937,7 @@ export class ShootingEngine {
     this.miniAngle += MINI_ORBIT_SPEED * dt;
     this.snapMinis();
     if (this.shotLevel < MINI_FIGHTER_LEVEL || !this.playerAlive || this.phase !== "playing") return;
-    for (const m of this.minis) {
+    for (const m of this.activeMinis()) {
       this.enemyBullets = this.enemyBullets.filter((b) => {
         if (!circlesIntersect(b.x, b.y, b.r, m.x, m.y, MINI_HIT_RADIUS)) return true;
         this.burst(b.x, b.y, 3, 80);
@@ -829,11 +953,22 @@ export class ShootingEngine {
   }
 
   private snapMinis(): void {
-    this.minis.forEach((m, i) => {
-      const angle = this.miniAngle + Math.PI * i;
-      m.x = this.playerX + Math.cos(angle) * MINI_ORBIT_RADIUS;
-      m.y = this.playerY + 2 + Math.sin(angle) * MINI_ORBIT_RADIUS;
-    });
+    const inner = this.minis.filter((m) => !m.outer);
+    const outer = this.minis.filter((m) => m.outer);
+    const place = (group: typeof this.minis, angle0: number, radius: number) =>
+      group.forEach((m, i) => {
+        const angle = angle0 + (Math.PI * 2 * i) / group.length;
+        m.x = this.playerX + Math.cos(angle) * radius;
+        m.y = this.playerY + 2 + Math.sin(angle) * radius;
+      });
+    place(inner, this.miniAngle, MINI_ORBIT_RADIUS);
+    place(outer, (this.miniAngle * OUTER_MINI_ORBIT_SPEED) / MINI_ORBIT_SPEED, OUTER_MINI_ORBIT_RADIUS);
+  }
+
+  // 今の攻撃レベルで出ているミニ戦闘機
+  private activeMinis(): typeof this.minis {
+    if (this.shotLevel < MINI_FIGHTER_LEVEL) return [];
+    return this.shotLevel >= OUTER_MINI_LEVEL ? this.minis : this.minis.filter((m) => !m.outer);
   }
 
   private firePlayerShots(): void {
@@ -874,7 +1009,11 @@ export class ShootingEngine {
     const config = this.stageConfig();
     switch (this.stageStep) {
       case "intro":
-        if (this.stepMs >= STAGE_INTRO_MS) {
+        if (this.stepMs >= STAGE_INTRO_MS && this.skipWaves) {
+          // 開発用: ザコ戦を飛ばして、すぐに「WARNING」からボス戦へ
+          this.skipWaves = false;
+          this.setStageStep("clearing");
+        } else if (this.stepMs >= STAGE_INTRO_MS) {
           this.spawnCooldownMs = 300;
           this.sound.playBgm(STAGE_BGM[this.stageIndex % STAGE_BGM.length]);
           this.setStageStep("waves");
@@ -885,7 +1024,7 @@ export class ShootingEngine {
         if (this.spawnCooldownMs <= 0) {
           const [startMs, endMs] = config.spawnIntervalMs;
           this.spawnCooldownMs = spawnInterval(this.stepMs, config.bossAfterMs, startMs, endMs);
-          this.spawnFormation();
+          this.spawnFormation(pickRandom(config.waveFormations));
         }
         if (this.stepMs >= config.bossAfterMs) this.setStageStep("clearing");
         break;
@@ -910,12 +1049,12 @@ export class ShootingEngine {
         break;
       case "boss":
         this.updateGuards(dtMs, config.bossGuards);
-        // ボスと戦っている間も、ときどきザコの編隊が出てくる(ハートを落としやすいザコ)
+        // ボスと戦っている間も、倒すまでずっとザコが出てくる(ハートを落としやすいザコ)
         if (this.bosses.some((b) => b.step === "entering" || b.step === "fighting")) {
           this.spawnCooldownMs -= dtMs;
           if (this.spawnCooldownMs <= 0) {
             this.spawnCooldownMs = randomBetween(config.bossMinionIntervalMs);
-            this.spawnFormation();
+            this.spawnFormation(pickRandom(config.bossFormations));
           }
         }
         break;
@@ -923,7 +1062,7 @@ export class ShootingEngine {
         if (this.stepMs >= STAGE_CLEAR_MS) {
           this.bosses = [];
           this.stageIndex += 1;
-          this.kills = 0;
+          this.timedStarsDropped = 0;
           this.setStageStep("intro");
           this.sound.playJingle("intro");
         }
@@ -946,29 +1085,32 @@ export class ShootingEngine {
     }
   }
 
-  private spawnFormation(): void {
-    const formations: (() => void)[] = [
-      () => {
-        // 片側から5体が一列に並んで入ってきて、横切っていく
-        this.spawnCrossLine(Math.random() < 0.5, 90 + Math.random() * 110, 5);
-      },
-      () => {
+  private spawnFormation(name: FormationName | undefined): void {
+    switch (name) {
+      case "crossLine":
+        // 片側から一列に並んで入ってきて、横切っていく(数はステージごと。STAGESのcrossLineCounts)
+        this.spawnCrossLine(Math.random() < 0.5, 90 + Math.random() * 110, this.stageConfig().crossLineCounts[0]);
+        break;
+      case "crossPair": {
         // 左右から1列ずつ、高さをずらして同時に入ってきてすれちがう
         const fromLeftHigh = Math.random() < 0.5;
-        this.spawnCrossLine(fromLeftHigh, 95, 4);
-        this.spawnCrossLine(!fromLeftHigh, 185, 4);
-      },
-      () => {
+        const count = this.stageConfig().crossLineCounts[1];
+        this.spawnCrossLine(fromLeftHigh, 95, count);
+        this.spawnCrossLine(!fromLeftHigh, 185, count);
+        break;
+      }
+      case "straight": {
         // 横に3体並んでまっすぐ降りてくる
         const cx = FIELD_W / 2 + (Math.random() - 0.5) * 120;
         for (const dx of [-90, 0, 90]) this.spawnEnemy("straight", clamp(cx + dx, 40, FIELD_W - 40), -50);
-      },
-      () => {
+        break;
+      }
+      case "zigzag":
         // 左右で2体、くねくね揺れながら降りてくる
         this.spawnEnemy("zigzag", FIELD_W * 0.3, -50);
         this.spawnEnemy("zigzag", FIELD_W * 0.7, -50);
-      },
-      () => {
+        break;
+      case "swoop": {
         // 片側の上の方から4体つながって、弧を描いて横切る
         const fromLeft = Math.random() < 0.5;
         const startY = 70 + Math.random() * 60;
@@ -978,28 +1120,102 @@ export class ShootingEngine {
             spawn: () => this.spawnEnemy("swoop", fromLeft ? -40 : FIELD_W + 40, startY, fromLeft ? 1 : -1),
           });
         }
-      },
-      () => {
+        break;
+      }
+      case "laser":
+        // 1体が降りてきて止まり、真下へ一直線のレーザーを撃ってくる
+        this.spawnEnemy("laser", 50 + Math.random() * (FIELD_W - 100), -50);
+        break;
+      case "beamerBurst":
         // 左右に1体ずつ降りてきて止まり、ビームを3連射してくる
         this.spawnEnemy("beamer", FIELD_W * 0.28, -50, 1, 3);
         this.pendingSpawns.push({ delayMs: 400, spawn: () => this.spawnEnemy("beamer", FIELD_W * 0.72, -50, 1, 3) });
-      },
-      () => {
+        break;
+      case "beamerLine":
         // 横に3体並んで降りてきて止まり、ビームを1発ずつ撃ってくる
         [0.2, 0.5, 0.8].forEach((ratio, i) => {
           this.pendingSpawns.push({ delayMs: i * 250, spawn: () => this.spawnEnemy("beamer", FIELD_W * ratio, -50) });
         });
-      },
-      () => {
-        // 1体が降りてきて止まり、真下へ一直線のレーザーを撃ってくる
-        this.spawnEnemy("laser", 50 + Math.random() * (FIELD_W - 100), -50);
-      },
-      () => {
+        break;
+      case "beamerSide":
+        // 左右の下の方から1体ずつ横に入ってきて止まり、ビームを1発ずつ撃ってくる
+        this.spawnSideBeamer(true);
+        this.pendingSpawns.push({ delayMs: 400, spawn: () => this.spawnSideBeamer(false) });
+        break;
+      case "dive":
         // 1体が途中で止まり、自機めがけて突っ込んでくる
         this.spawnEnemy("dive", 60 + Math.random() * (FIELD_W - 120), -50);
-      },
-    ];
-    pickRandom(formations)();
+        break;
+      case "diveSide":
+        // 突っ込んでくるザコが1体、左右どちらかの上の方から横に入ってくる
+        this.spawnSideDive(Math.random() < 0.5, false);
+        break;
+      case "diveLow":
+        // 突っ込んでくるザコが1体、左右どちらかの下の方から横に入ってくる
+        this.spawnSideDive(Math.random() < 0.5, true);
+        break;
+      case "diveMix": {
+        // 突っ込んでくるザコが1体。上から降りてくるもの・左右の上の方から入ってくるもの・左右の下の方から入ってくるものが3分の1ずつ
+        const r = Math.random();
+        if (r < 1 / 3) {
+          this.spawnEnemy("dive", 60 + Math.random() * (FIELD_W - 120), -50);
+        } else {
+          this.spawnSideDive(Math.random() < 0.5, r >= 2 / 3);
+        }
+        break;
+      }
+      case "tank":
+        this.spawnTank();
+        break;
+      case "orbitRing":
+        this.spawnOrbitRing();
+        break;
+    }
+  }
+
+  // 少し強いザコが、ランダムな位置に1体、ゆっくり降りてくる
+  private spawnTank(): void {
+    const e = this.spawnEnemy("tank", 60 + Math.random() * (FIELD_W - 120), -70);
+    if (!e) return;
+    e.w *= TANK_SCALE;
+    e.h *= TANK_SCALE;
+    e.hp = this.stageConfig().enemyHp * TANK_HP_SCALE;
+  }
+
+  // 6体が輪になって、回りながらゆっくり降りてくる
+  private spawnOrbitRing(): void {
+    const cx = FIELD_W / 2 + (Math.random() - 0.5) * 100;
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    for (let i = 0; i < ORBIT_COUNT; i++) {
+      const e = this.spawnEnemy("orbit", cx, -ORBIT_RADIUS - 40, dir);
+      if (!e) continue;
+      e.orbitAngle = (Math.PI * 2 * i) / ORBIT_COUNT;
+      this.updateOrbitEnemy(e, 0);
+    }
+  }
+
+  // 横から入ってきて、画面の端の近くで止まってから自機めがけて突っ込んでくるザコ。
+  // low なら、下の方からビームを撃つザコと同じ高さ(自機に近い高さ)から入ってくる
+  private spawnSideDive(fromLeft: boolean, low: boolean): void {
+    const y = low ? this.fieldH * randomBetween(SIDE_BEAMER_Y) : 120 + Math.random() * 180;
+    const e = this.spawnEnemy("dive", fromLeft ? -40 : FIELD_W + 40, y);
+    if (!e) return;
+    e.diveFromSide = true;
+    e.baseX = fromLeft ? 60 + Math.random() * 100 : FIELD_W - 60 - Math.random() * 100;
+    e.vx = fromLeft ? SIDE_DIVE_ENTER_SPEED : -SIDE_DIVE_ENTER_SPEED;
+    e.vy = 0;
+  }
+
+  // 画面の下の方(自機に近い高さ)に横から入ってきて、画面の端の近くで止まってビームを撃つザコ
+  private spawnSideBeamer(fromLeft: boolean): void {
+    const y = this.fieldH * randomBetween(SIDE_BEAMER_Y);
+    const e = this.spawnEnemy("beamer", fromLeft ? -40 : FIELD_W + 40, y);
+    if (!e) return;
+    e.diveFromSide = true;
+    e.diveStopY = y;
+    e.baseX = fromLeft ? 45 + Math.random() * 40 : FIELD_W - 45 - Math.random() * 40;
+    e.vx = fromLeft ? SIDE_DIVE_ENTER_SPEED : -SIDE_DIVE_ENTER_SPEED;
+    e.vy = 0;
   }
 
   private spawnEnemy(kind: EnemyKind, x: number, y: number, direction = 1, beamShots = 1): Enemy | null {
@@ -1025,6 +1241,7 @@ export class ShootingEngine {
       dyingMs: null,
       diveStep: "enter",
       diveStopY: 110 + Math.random() * 80,
+      diveFromSide: false,
       divePauseMs: 0,
       beamShots,
       beamLeft: 0,
@@ -1035,6 +1252,7 @@ export class ShootingEngine {
       laserLen: 0,
       guardOf: null,
       orbitAngle: 0,
+      orbitCy: y,
     };
     switch (kind) {
       case "straight":
@@ -1050,6 +1268,15 @@ export class ShootingEngine {
         break;
       case "dive":
         enemy.vy = 140;
+        break;
+      case "tank":
+        enemy.vy = TANK_SPEED;
+        break;
+
+      case "orbit":
+        // 輪の中心(baseX, orbitCy)が降りていき、そのまわりをdirectionの向きに回る
+        enemy.vx = direction;
+        enemy.vy = ORBIT_FALL_SPEED;
         break;
       case "beamer":
         enemy.vy = 90;
@@ -1072,16 +1299,16 @@ export class ShootingEngine {
     const config = this.stageConfig();
     this.guardCooldownMs = 0;
     if (config.bossType === "big" || config.bossType === "bigRush") {
-      this.spawnBoss(config.bossType, FIELD_W / 2, BOSS_REST_Y, BOSS_HEIGHT, config.bossHp, 0);
+      this.spawnBoss(config.bossType, FIELD_W / 2, BOSS_REST_Y, BOSS_HEIGHT, config.bossHp);
     } else {
-      // 左右に1体ずつ。突っ込むタイミングをずらすため、右の1体は少し遅れて動き出す
-      // 2体はHPを共有する(どちらに当てても両方のHPが同じだけ減り、同時に倒れる)ので、それぞれにbossHpを持たせる
-      this.spawnBoss("twinRush", FIELD_W * 0.28, TWIN_REST_Y, TWIN_BOSS_HEIGHT, config.bossHp, 0);
-      this.spawnBoss("twinRush", FIELD_W * 0.72, TWIN_REST_Y, TWIN_BOSS_HEIGHT, config.bossHp, -TWIN_HOVER_MS[0]);
+      // 左右に1体ずつ。HPは別々で、2体合わせてbossHp
+      this.spawnBoss("twin", FIELD_W * 0.28, TWIN_REST_Y, TWIN_BOSS_HEIGHT, config.bossHp / 2);
+      this.spawnBoss("twin", FIELD_W * 0.72, TWIN_REST_Y, TWIN_BOSS_HEIGHT, config.bossHp / 2);
+      this.crossfire = { step: "idle", ms: 0, cooldownMs: BOSS_ENTER_MS + CROSSFIRE_FIRST_MS, shotMs: 0 };
     }
   }
 
-  private spawnBoss(kind: Boss["kind"], homeX: number, homeY: number, h: number, hp: number, rushMs: number): void {
+  private spawnBoss(kind: Boss["kind"], homeX: number, homeY: number, h: number, hp: number): void {
     const ready = this.readySprites();
     const unused = ready.filter((s) => !this.usedBossSprites.includes(s));
     const sprite = pickRandom(unused.length > 0 ? unused : ready);
@@ -1099,10 +1326,9 @@ export class ShootingEngine {
       homeX,
       homeY,
       rushStep: "hover",
-      rushMs,
+      rushMs: 0,
       rushVx: 0,
       rushVy: 0,
-      hoverMs: kind === "bigRush" ? BIG_RUSH_HOVER_MS : randomBetween(TWIN_HOVER_MS),
       wanderX: homeX,
       wanderY: homeY,
       wanderMs: 0,
@@ -1115,6 +1341,11 @@ export class ShootingEngine {
       spinAngle: 0,
       flashMs: 0,
       nextBlastMs: 0,
+      barrierHp: 0,
+      barrierMaxHp: 0,
+      barrierMs: 0,
+      barrierCooldownMs: BOSS_ENTER_MS + BARRIER_FIRST_MS,
+      barrierFlashMs: 0,
     });
   }
 
@@ -1143,6 +1374,10 @@ export class ShootingEngine {
         case "dive":
           this.updateDiveEnemy(e, dtMs);
           break;
+        case "orbit":
+          this.updateOrbitEnemy(e, dt);
+          break;
+
         case "beamer":
           this.updateBeamer(e, dtMs);
           continue; // 撃ち方がほかのザコとちがうので、下のふつうの弾は撃たない
@@ -1178,15 +1413,33 @@ export class ShootingEngine {
   private updateBeamer(e: Enemy, dtMs: number): void {
     const dt = dtMs / 1000;
     const leaving = e.ageMs > BEAMER_STAY_MS && e.beamLeft === 0;
-    if (leaving) {
-      e.y -= 110 * dt;
-      return;
+    if (e.diveFromSide) {
+      // 横から入ってきたものは、入ってきた側へ帰っていく
+      const fromLeft = e.baseX < FIELD_W / 2;
+      if (leaving) {
+        e.x += (fromLeft ? -110 : 110) * dt;
+        return;
+      }
+      if (e.vx !== 0) {
+        e.x += e.vx * dt;
+        if (fromLeft ? e.x >= e.baseX : e.x <= e.baseX) {
+          e.x = e.baseX;
+          e.vx = 0;
+        }
+        return;
+      }
+      e.y = e.diveStopY + Math.sin((e.ageMs - 1000) / 700) * 14; // 止まっている間は上下にゆっくり揺れる
+    } else {
+      if (leaving) {
+        e.y -= 110 * dt;
+        return;
+      }
+      if (e.y < e.diveStopY) {
+        e.y = Math.min(e.diveStopY, e.y + e.vy * dt);
+        return;
+      }
+      e.x = e.baseX + Math.sin((e.ageMs - 1000) / 700) * 18; // 止まっている間は左右にゆっくり揺れる
     }
-    if (e.y < e.diveStopY) {
-      e.y = Math.min(e.diveStopY, e.y + e.vy * dt);
-      return;
-    }
-    e.x = e.baseX + Math.sin((e.ageMs - 1000) / 700) * 18; // 止まっている間は左右にゆっくり揺れる
 
     if (e.beamLeft > 0) {
       e.beamGapMs -= dtMs;
@@ -1233,9 +1486,24 @@ export class ShootingEngine {
         break;
       case "fire":
         e.laserLen = Math.min(this.fieldH, e.laserLen + LASER_EXTEND_SPEED * dt);
-        if (e.laserMs >= LASER_STAY_MS) e.y -= LASER_LEAVE_SPEED * dt;
+        if (e.laserMs >= LASER_FIRE_MS) {
+          e.laserStep = "done";
+          e.laserMs = 0;
+          e.laserLen = 0;
+        }
+        break;
+      case "done":
+        e.y -= LASER_LEAVE_SPEED * dt;
         break;
     }
+  }
+
+  // 輪の中心が降りていき、そのまわりを回る
+  private updateOrbitEnemy(e: Enemy, dt: number): void {
+    e.orbitCy += e.vy * dt;
+    e.orbitAngle += ORBIT_SPEED * e.vx * dt;
+    e.x = e.baseX + Math.cos(e.orbitAngle) * ORBIT_RADIUS;
+    e.y = e.orbitCy + Math.sin(e.orbitAngle) * ORBIT_RADIUS;
   }
 
   // ボスのまわりを回り続ける(ボスが体当たりしている間もついていく)。自機の弾はボスより先にガードに当たる
@@ -1278,13 +1546,22 @@ export class ShootingEngine {
   private updateDiveEnemy(e: Enemy, dtMs: number): void {
     const dt = dtMs / 1000;
     switch (e.diveStep) {
-      case "enter":
-        e.y += e.vy * dt;
-        if (e.y >= e.diveStopY) {
+      case "enter": {
+        let arrived: boolean;
+        if (e.diveFromSide) {
+          e.x += e.vx * dt;
+          arrived = e.vx > 0 ? e.x >= e.baseX : e.x <= e.baseX;
+          if (arrived) e.x = e.baseX;
+        } else {
+          e.y += e.vy * dt;
+          arrived = e.y >= e.diveStopY;
+        }
+        if (arrived) {
           e.diveStep = "pause";
           e.divePauseMs = 0;
         }
         break;
+      }
       case "pause":
         // 少し震えて「来るぞ」と知らせてから、その時の自機の位置めがけて突っ込む
         e.divePauseMs += dtMs;
@@ -1304,7 +1581,102 @@ export class ShootingEngine {
   }
 
   private updateBosses(dtMs: number): void {
+    if (this.bosses.some((b) => b.kind === "twin")) this.updateCrossfire(dtMs);
     for (const boss of this.bosses) this.updateBoss(boss, dtMs);
+  }
+
+  // ボスのバリア(STAGESのbossBarrier): 時間が来たら張り、壊されたらまた時間を数え始める
+  private updateBarrier(boss: Boss, dtMs: number): void {
+    const barrier = this.stageConfig().bossBarrier;
+    if (!barrier) return;
+    boss.barrierFlashMs = Math.max(0, boss.barrierFlashMs - dtMs);
+    if (boss.barrierHp > 0) {
+      boss.barrierMs += dtMs;
+      return;
+    }
+    boss.barrierCooldownMs -= dtMs;
+    if (boss.barrierCooldownMs <= 0) {
+      boss.barrierHp = barrier.hp;
+      boss.barrierMaxHp = barrier.hp;
+      boss.barrierMs = 0;
+      this.sound.playSfx("laserCharge");
+    }
+  }
+
+  private barrierRadius(boss: Boss): number {
+    return Math.max(boss.w, boss.h) * BARRIER_RADIUS_SCALE;
+  }
+
+  private hitBarrier(boss: Boss, damage: number): void {
+    boss.barrierHp -= damage;
+    boss.barrierFlashMs = HIT_FLASH_MS;
+    if (boss.barrierHp > 0) {
+      this.sound.playSfx("hit");
+      return;
+    }
+    // 壊れた: バリアのふちから破片が飛び散る
+    boss.barrierHp = 0;
+    boss.barrierCooldownMs = this.stageConfig().bossBarrier?.intervalMs ?? 0;
+    const r = this.barrierRadius(boss);
+    for (let i = 0; i < 12; i++) {
+      const a = (Math.PI * 2 * i) / 12;
+      this.burst(boss.x + Math.cos(a) * r, boss.y + Math.sin(a) * r, 3, 160);
+    }
+    this.sound.playSfx("blast");
+    this.addText(boss.x, boss.y - boss.h / 2, "BREAK!");
+  }
+
+  // twinの2体の十字砲火。2体とも戦っている間だけ撃つ(1体が倒れたらその場でやめる)
+  private updateCrossfire(dtMs: number): void {
+    const pair = this.bosses.filter((b) => b.kind === "twin" && b.step === "fighting");
+    const c = this.crossfire;
+    if (pair.length < 2) {
+      c.step = "idle";
+      return;
+    }
+    c.ms += dtMs;
+    switch (c.step) {
+      case "idle":
+        c.cooldownMs -= dtMs;
+        if (c.cooldownMs <= 0 && this.playerAlive) {
+          c.step = "charge";
+          c.ms = 0;
+          this.sound.playSfx("laserCharge");
+        }
+        break;
+      case "charge":
+        if (c.ms >= CROSSFIRE_CHARGE_MS) {
+          c.step = "fire";
+          c.ms = 0;
+          c.shotMs = 0;
+        }
+        break;
+      case "fire": {
+        c.shotMs -= dtMs;
+        if (c.shotMs <= 0 && this.playerAlive) {
+          c.shotMs = CROSSFIRE_SHOT_MS;
+          const config = this.stageConfig();
+          const sweep = Math.sin((c.ms / CROSSFIRE_FIRE_MS) * Math.PI * 2) * CROSSFIRE_SWEEP;
+          for (const b of pair) {
+            const left = b.homeX < FIELD_W / 2;
+            // 画面の真ん中の下の方を向いた向きを中心に振る。右の1体は左の1体と左右対称の向き
+            const muzzleY = b.y + b.h * 0.2;
+            const base = aimAngle(b.x, muzzleY, FIELD_W / 2, this.fieldH * 0.8);
+            const angle = base + (left ? sweep : -sweep);
+            for (const a of fanAngles(angle, 2, CROSSFIRE_SPREAD)) {
+              this.fireEnemyBullet(b.x, muzzleY, a, 190 * config.bossBulletSpeedScale, BEAM_CYAN, 6);
+            }
+          }
+        }
+        if (c.ms >= CROSSFIRE_FIRE_MS) {
+          c.step = "idle";
+          c.ms = 0;
+          c.cooldownMs = randomBetween(CROSSFIRE_INTERVAL_MS);
+          for (const b of pair) this.pickTwinWanderSpot(b);
+        }
+        break;
+      }
+    }
   }
 
   private updateBoss(boss: Boss, dtMs: number): void {
@@ -1327,7 +1699,10 @@ export class ShootingEngine {
         break;
       }
       case "fighting":
-        if (boss.kind === "twinRush" || boss.kind === "bigRush") {
+        this.updateBarrier(boss, dtMs);
+        if (boss.kind === "twin") {
+          this.updateTwinBoss(boss, dtMs);
+        } else if (boss.kind === "bigRush") {
           this.updateRushBoss(boss, dtMs);
         } else {
           boss.x = boss.homeX + Math.sin(t * 0.7) * 95;
@@ -1349,51 +1724,72 @@ export class ShootingEngine {
     }
   }
 
-  // 体当たりしてくるボス。浮かんでいる間は弾を撃ち、時間が来ると震えてためてから自機めがけて突っ込み、元の位置へ戻る。
-  // twinRush: 中くらいの2体。浮かんでいる間の弾は少なめ。
-  //   2体が同時に突っ込むと避けようがないので、もう1体が浮かんでいる時だけ突っ込み始める
-  // bigRush: 大きな1体。浮かんでいる間は大きなボスと同じ弾のパターンを撃つ
-  private updateRushBoss(boss: Boss, dtMs: number): void {
+  // twin: 中くらいの2体。HPは別々。それぞれ自分の側(左半分・右半分)の中で不規則に動き回りながら、ときどき3方向の弾を撃つ(弾は少なめ)。
+  // ときどき2体で十字砲火をする(updateCrossfire)。その間はふだんの弾は撃たず、左右対称の位置で止まって撃つ。
+  // 1体が倒れると、残った1体は怒って画面の上の方全体を速く動き回り、5方向の弾をたくさん撃つ。
+  // 突っ込んでこないかわりに、ボス戦中は突っ込んでくるザコが次々に出てくる(STAGESのbossFormations)
+  private updateTwinBoss(boss: Boss, dtMs: number): void {
     const dt = dtMs / 1000;
     const config = this.stageConfig();
+    if (this.crossfire.step !== "idle") {
+      // 光をためている間に左右対称の位置へ動き、撃っている間はそこで止まる
+      const left = boss.homeX < FIELD_W / 2;
+      const toX = left ? FIELD_W * CROSSFIRE_SPOT[0] : FIELD_W * (1 - CROSSFIRE_SPOT[0]);
+      const ease = Math.min(1, 6 * dt);
+      boss.x += (toX - boss.x) * ease;
+      boss.y += (CROSSFIRE_SPOT[1] - boss.y) * ease;
+      return;
+    }
+    const alone = this.isTwinAlone(boss);
+    boss.wanderMs -= dtMs;
+    if (boss.wanderMs <= 0) this.pickTwinWanderSpot(boss);
+    const ease = Math.min(1, boss.wanderEase * (alone ? 1.6 : 1) * dt);
+    boss.x += (boss.wanderX - boss.x) * ease;
+    boss.y += (boss.wanderY - boss.y) * ease;
+    boss.fireMs -= dtMs;
+    if (boss.fireMs <= 0 && this.playerAlive) {
+      boss.fireMs = TWIN_FIRE_MS * config.bossFireIntervalScale * (alone ? TWIN_ALONE_FIRE_SCALE : 1);
+      const muzzleY = boss.y + boss.h * 0.2;
+      const center = aimAngle(boss.x, muzzleY, this.playerX, this.playerY);
+      for (const angle of fanAngles(center, alone ? 5 : 3, alone ? 0.26 : 0.3)) {
+        this.fireEnemyBullet(boss.x, muzzleY, angle, (alone ? 200 : 170) * config.bossBulletSpeedScale, BEAM_RED, 6);
+      }
+    }
+  }
+
+  // twinの相方が倒れて、1体だけ残っているか
+  private isTwinAlone(boss: Boss): boolean {
+    return boss.kind === "twin" && this.bosses.some((b) => b !== boss && b.kind === "twin" && b.step === "dying");
+  }
+
+  // ボスが怒っているか: twinは相方が倒れた時、ほかはHPが半分を切った時
+  private isBossEnraged(boss: Boss): boolean {
+    return boss.kind === "twin" ? this.isTwinAlone(boss) : boss.hp <= boss.maxHp * BOSS_ENRAGE_RATIO;
+  }
+
+  // bigRush: 体当たりしてくる大きなボス。浮かんでいる間は大きなボスと同じ弾のパターンを撃ち、
+  // 時間が来ると震えてためてから自機めがけて突っ込み、元の位置へ戻る
+  private updateRushBoss(boss: Boss, dtMs: number): void {
+    const dt = dtMs / 1000;
     const enraged = boss.hp <= boss.maxHp * BOSS_ENRAGE_RATIO;
     boss.rushMs += dtMs;
     switch (boss.rushStep) {
       case "hover": {
         const t = boss.stepMs / 1000;
-        const othersCalm = this.bosses.every((b) => b === boss || b.step !== "fighting" || b.rushStep === "hover");
-        if (boss.rushMs >= (enraged ? boss.hoverMs * 0.6 : boss.hoverMs) && othersCalm && this.playerAlive) {
+        if (boss.rushMs >= (enraged ? BIG_RUSH_HOVER_MS * 0.6 : BIG_RUSH_HOVER_MS) && this.playerAlive) {
           boss.rushStep = "windup";
           boss.rushMs = 0;
           break;
         }
-        if (boss.kind === "bigRush") {
-          boss.x = boss.homeX + Math.sin(t * 0.7) * 95;
-          boss.y = boss.homeY + Math.sin(t * 1.3) * 22;
-          this.updateBossAttack(boss, dtMs);
-          break;
-        }
-        // 自分の側(左半分・右半分)の中で、ときどき向かう場所と速さを選び直して、不規則に動き回る
-        boss.wanderMs -= dtMs;
-        if (boss.wanderMs <= 0) this.pickTwinWanderSpot(boss);
-        const ease = Math.min(1, boss.wanderEase * dt);
-        boss.x += (boss.wanderX - boss.x) * ease;
-        boss.y += (boss.wanderY - boss.y) * ease;
-        boss.fireMs -= dtMs;
-        if (boss.fireMs <= 0 && this.playerAlive) {
-          boss.fireMs = TWIN_FIRE_MS * config.bossFireIntervalScale;
-          const muzzleY = boss.y + boss.h * 0.2;
-          const center = aimAngle(boss.x, muzzleY, this.playerX, this.playerY);
-          for (const angle of fanAngles(center, 3, 0.3)) {
-            this.fireEnemyBullet(boss.x, muzzleY, angle, 170 * config.bossBulletSpeedScale, BEAM_RED, 6);
-          }
-        }
+        boss.x = boss.homeX + Math.sin(t * 0.7) * 95;
+        boss.y = boss.homeY + Math.sin(t * 1.3) * 22;
+        this.updateBossAttack(boss, dtMs);
         break;
       }
       case "windup":
         // その場で震えて、突っ込んでくるのを知らせる
         boss.x += (Math.random() - 0.5) * 5;
-        if (boss.rushMs >= TWIN_WINDUP_MS) {
+        if (boss.rushMs >= RUSH_WINDUP_MS) {
           // 迫り始める向きは、ため終わった時の自機の位置で決める(速さは迫っている間に決める)
           const angle = aimAngle(boss.x, boss.y, this.playerX, this.playerY);
           boss.rushVx = Math.cos(angle);
@@ -1405,8 +1801,7 @@ export class ShootingEngine {
       case "rush": {
         // ゆっくり迫ってくる: 自機の方へ少しずつ向きを変えながら進み、だんだん速くなる。
         // 曲がれる速さに上限があるので、横へ大きく動けばかわせる
-        const base = boss.kind === "bigRush" ? BIG_RUSH_SPEED : TWIN_RUSH_SPEED;
-        const speed = (enraged ? base * 1.3 : base) * Math.min(1, 0.5 + boss.rushMs / 1600);
+        const speed = (enraged ? BIG_RUSH_SPEED * 1.3 : BIG_RUSH_SPEED) * Math.min(1, 0.5 + boss.rushMs / 1600);
         const heading = Math.atan2(boss.rushVy, boss.rushVx);
         let turn = aimAngle(boss.x, boss.y, this.playerX, this.playerY) - heading;
         turn = Math.atan2(Math.sin(turn), Math.cos(turn)); // -π〜πにそろえる
@@ -1417,28 +1812,23 @@ export class ShootingEngine {
         boss.y += boss.rushVy * dt;
         // 画面の端まで行くか、一定時間たったら戻る
         const hitEdge = boss.y > this.fieldH - boss.h * 0.4 || boss.x < boss.w * 0.3 || boss.x > FIELD_W - boss.w * 0.3;
-        if (hitEdge || boss.rushMs >= TWIN_RUSH_MAX_MS) {
+        if (hitEdge || boss.rushMs >= RUSH_MAX_MS) {
           boss.rushStep = "return";
           boss.rushMs = 0;
         }
         break;
       }
       case "return": {
-        // bigRushは元の位置へ、twinRushは自分の側のどこか(不規則)へ戻る
-        if (boss.kind === "twinRush" && boss.rushMs <= dtMs) this.pickTwinWanderSpot(boss);
-        const toX = boss.kind === "twinRush" ? boss.wanderX : boss.homeX;
-        const toY = boss.kind === "twinRush" ? boss.wanderY : boss.homeY;
-        const dx = toX - boss.x;
-        const dy = toY - boss.y;
+        const dx = boss.homeX - boss.x;
+        const dy = boss.homeY - boss.y;
         const dist = Math.hypot(dx, dy);
-        const step = TWIN_RETURN_SPEED * dt;
+        const step = RUSH_RETURN_SPEED * dt;
         if (dist <= step) {
-          boss.x = toX;
-          boss.y = toY;
+          boss.x = boss.homeX;
+          boss.y = boss.homeY;
           boss.rushStep = "hover";
           boss.rushMs = 0;
           boss.stepMs = 0; // 浮かぶ揺れを基準の位置から始め直す
-          if (boss.kind === "twinRush") boss.hoverMs = randomBetween(TWIN_HOVER_MS);
         } else {
           boss.x += (dx / dist) * step;
           boss.y += (dy / dist) * step;
@@ -1448,14 +1838,16 @@ export class ShootingEngine {
     }
   }
 
-  // twinRushが次に向かう場所: 自分の側(左の1体は左半分、右の1体は右半分)の上の方のどこか
+  // twinが次に向かう場所: 自分の側(左の1体は左半分、右の1体は右半分)の上の方のどこか。
+  // 1体だけ残ったら、画面の上の方全体から選び、選び直す間隔も短くする
   private pickTwinWanderSpot(boss: Boss): void {
     const left = boss.homeX < FIELD_W / 2;
-    const minX = left ? boss.w * 0.6 : FIELD_W / 2 + boss.w * 0.3;
-    const maxX = left ? FIELD_W / 2 - boss.w * 0.3 : FIELD_W - boss.w * 0.6;
+    const alone = this.isTwinAlone(boss);
+    const minX = alone || left ? boss.w * 0.6 : FIELD_W / 2 + boss.w * 0.3;
+    const maxX = !alone && left ? FIELD_W / 2 - boss.w * 0.3 : FIELD_W - boss.w * 0.6;
     boss.wanderX = minX + Math.random() * Math.max(0, maxX - minX);
     boss.wanderY = randomBetween(TWIN_WANDER_Y);
-    boss.wanderMs = randomBetween(TWIN_WANDER_MS);
+    boss.wanderMs = randomBetween(TWIN_WANDER_MS) * (alone ? 0.6 : 1);
     boss.wanderEase = randomBetween([1.2, 3.5]);
   }
 
@@ -1611,18 +2003,21 @@ export class ShootingEngine {
         if (shot.blast) this.explodeShot(shot.x, shot.y, shot.blast, e);
         return false;
       }
+      // バリアを張っているボスは、バリアに当たった弾をすべて受け止める(ボスには効かない)
+      const shielded = this.bosses.find((b) => b.step === "fighting" && b.barrierHp > 0 && circlesIntersect(shot.x, shot.y, shot.r, b.x, b.y, this.barrierRadius(b)));
+      if (shielded) {
+        this.hitBarrier(shielded, shot.damage ?? 1);
+        if (shot.blast) this.explodeShot(shot.x, shot.y, shot.blast, null);
+        return false;
+      }
       const boss = this.bosses.find((b) => b.step === "fighting" && circleIntersectsRect(shot.x, shot.y, shot.r, this.hitbox(b.x, b.y, b.w, b.h)));
       if (boss) {
         const damage = shot.damage ?? 1;
-        // twinRushの2体はHPを共有するので、どちらに当てても2体とも同じだけ減らし、同時に倒れるようにする
-        const targets = boss.kind === "twinRush" ? this.bosses.filter((b) => b.kind === "twinRush" && b.step === "fighting") : [boss];
-        for (const b of targets) {
-          b.hp -= damage;
-          b.flashMs = HIT_FLASH_MS;
-        }
+        boss.hp -= damage;
+        boss.flashMs = HIT_FLASH_MS;
         this.sound.playSfx("hit");
         this.score += 10 * damage;
-        for (const b of targets) if (b.hp <= 0) this.onBossDefeated(b);
+        if (boss.hp <= 0) this.onBossDefeated(boss);
         if (shot.blast) this.explodeShot(shot.x, shot.y, shot.blast, null);
         return false;
       }
@@ -1630,8 +2025,8 @@ export class ShootingEngine {
     });
   }
 
-  // レベル6の強い弾の爆発: まわりのザコ(直接当たった1体は除く)にダメージを与える。
-  // ボスには直接当たった分だけ(2体のボスはHPを共有しているので、爆発で2重に減らないように)
+  // レベル6以上の強い弾の爆発: まわりのザコ(直接当たった1体は除く)にダメージを与える。
+  // ボスには直接当たった分だけ
   private explodeShot(x: number, y: number, blast: { radius: number; damage: number }, directHit: Enemy | null): void {
     this.blasts.push({ x, y, radius: blast.radius, ms: 0 });
     this.burst(x, y, 16, 240);
@@ -1675,20 +2070,34 @@ export class ShootingEngine {
   private onEnemyDefeated(e: Enemy): void {
     e.dyingMs = 0;
     this.sound.playSfx("defeat");
-    this.kills += 1;
-    this.score += ENEMY_SCORE;
-    this.burst(e.x, e.y, 12, 160);
-    this.addText(e.x, e.y - e.h / 2, `+${ENEMY_SCORE}`);
-    // ライフを先に抽選し、出なかった時だけパワーアップを抽選する(1体から2つは落とさない)。
-    // ライフはボス戦中に出てくるザコからの方が出やすい
-    // 確率は[ザコ戦, ボス戦中]の組で持っている
+    const score = e.kind === "tank" ? TANK_SCORE : ENEMY_SCORE;
+    this.score += score;
+    this.burst(e.x, e.y, e.kind === "tank" ? 24 : 12, 160);
+    this.addText(e.x, e.y - e.h / 2, `+${score}`);
+    // 決まったタイミングの星が出る番なら必ず星を落とす。そうでなければライフを先に抽選し、
+    // 出なかった時だけパワーアップを抽選する(1体から2つは落とさない)。確率はどちらも[ザコ戦, ボス戦中]の組で持っている
     const config = this.stageConfig();
     const phase = this.stageStep === "boss" ? 1 : 0;
-    if (Math.random() < config.lifeDropChance[phase]) {
+    if (this.timedStarsDropped < this.timedStarsDue()) {
+      this.timedStarsDropped += 1;
+      this.items.push({ kind: "power", x: e.x, y: e.y, ageMs: 0 });
+    } else if (Math.random() < config.lifeDropChance[phase]) {
       this.items.push({ kind: "life", x: e.x, y: e.y, ageMs: 0 });
-    } else if (this.kills % config.powerGuaranteedEvery[phase] === 0 || Math.random() < config.powerDropChance[phase]) {
+    } else if (Math.random() < config.powerDropChance[phase]) {
       this.items.push({ kind: "power", x: e.x, y: e.y, ageMs: 0 });
     }
+  }
+
+  // 決まったタイミングの星(STAGESのpowerDropTimings)が、今までにいくつ出る番になったか
+  private timedStarsDue(): number {
+    const timings = this.stageConfig().powerDropTimings;
+    if (!timings || this.stageStep === "intro") return 0;
+    if (this.stageStep === "waves") {
+      const progress = this.stepMs / this.stageConfig().bossAfterMs;
+      return timings.waves.filter((t) => progress >= t).length;
+    }
+    const bossDue = this.stageStep === "boss" ? timings.boss.filter((ms) => this.stepMs >= ms).length : 0;
+    return timings.waves.length + bossDue;
   }
 
   private onBossDefeated(boss: Boss): void {
@@ -1813,8 +2222,10 @@ export class ShootingEngine {
     if (this.playerAlive && this.phase !== "home" && this.phase !== "gameover") this.drawPlayer(ctx);
     this.particles.forEach((p) => this.drawParticle(ctx, p));
     this.blasts.forEach((b) => this.drawBlast(ctx, b));
+    this.shockwaves.forEach((w) => this.drawShockwave(ctx, w));
     // 敵の弾は一番見落としてはいけないので、演出より手前に描く
     this.enemies.forEach((e) => this.drawLaser(ctx, e));
+    this.drawCrossfireCharge(ctx);
     this.enemyBullets.forEach((b) => this.drawEnemyBullet(ctx, b));
     this.texts.forEach((t) => this.drawText(ctx, t));
 
@@ -1955,9 +2366,22 @@ export class ShootingEngine {
     ctx.restore();
   }
 
+  // 十字砲火の予告: 2体の口元に水色の光がだんだん大きくなる
+  private drawCrossfireCharge(ctx: CanvasRenderingContext2D): void {
+    if (this.crossfire.step !== "charge") return;
+    const p = this.crossfire.ms / CROSSFIRE_CHARGE_MS;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const b of this.bosses) {
+      if (b.kind !== "twin" || b.step !== "fighting") continue;
+      this.drawMuzzleGlow(ctx, b.x, b.y + b.h * 0.2, 6 + p * 18, p, BEAM_CYAN);
+    }
+    ctx.restore();
+  }
+
   // laserの予告の細い線と、撃っている間の太いレーザー
   private drawLaser(ctx: CanvasRenderingContext2D, e: Enemy): void {
-    if (e.kind !== "laser" || e.dyingMs !== null || e.laserStep === "wait") return;
+    if (e.kind !== "laser" || e.dyingMs !== null || e.laserStep === "wait" || e.laserStep === "done") return;
     const top = e.y + e.h * 0.3;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
@@ -1992,10 +2416,10 @@ export class ShootingEngine {
     ctx.restore();
   }
 
-  private drawMuzzleGlow(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, p: number): void {
+  private drawMuzzleGlow(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, p: number, color = BEAM_RED): void {
     const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
     glow.addColorStop(0, "#ffffff");
-    glow.addColorStop(0.35, BEAM_RED);
+    glow.addColorStop(0.35, color);
     glow.addColorStop(1, "rgba(0, 0, 0, 0)");
     ctx.fillStyle = glow;
     ctx.globalAlpha = 0.4 + p * 0.6;
@@ -2031,8 +2455,7 @@ export class ShootingEngine {
     ctx.translate(boss.x, boss.y);
     if (boss.step === "dying") {
       const p = Math.min(1, boss.stepMs / BOSS_DYING_MS);
-      ctx.globalAlpha = 1 - p * p;
-      this.drawBossAura(ctx, boss);
+      ctx.globalAlpha = 1 - p * p; // 倒したボスはオーラを消す
       ctx.rotate(Math.sin(boss.stepMs / 40) * 0.08);
       this.drawSprite(ctx, boss.sprite, boss.w, boss.h, 0.3 + 0.3 * Math.sin(boss.stepMs / 60));
     } else {
@@ -2041,12 +2464,36 @@ export class ShootingEngine {
       this.drawSprite(ctx, boss.sprite, boss.w, boss.h, boss.flashMs > 0 ? 0.6 : 0);
     }
     ctx.restore();
+    if (boss.step === "fighting" && boss.barrierHp > 0) this.drawBarrier(ctx, boss);
+  }
+
+  // ボスのバリア: 水色に光る丸い膜。張った時にふくらんで出てきて、残りHPが減るほど薄く、ちらつくようになる
+  private drawBarrier(ctx: CanvasRenderingContext2D, boss: Boss): void {
+    const grow = Math.min(1, boss.barrierMs / 300);
+    const r = this.barrierRadius(boss) * (0.6 + 0.4 * (1 - (1 - grow) ** 3));
+    const left = boss.barrierHp / boss.barrierMaxHp;
+    const flicker = left < 0.35 ? 0.6 + 0.4 * Math.abs(Math.sin(boss.barrierMs / 45)) : 1;
+    const hit = boss.barrierFlashMs > 0 ? 1 : 0;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const fill = ctx.createRadialGradient(boss.x, boss.y, r * 0.6, boss.x, boss.y, r);
+    fill.addColorStop(0, "rgba(32, 216, 255, 0)");
+    fill.addColorStop(1, `rgba(32, 216, 255, ${(0.18 + 0.2 * left + 0.25 * hit) * flicker})`);
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(boss.x, boss.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = (0.45 + 0.5 * left + 0.3 * hit) * flicker;
+    ctx.strokeStyle = hit ? "#ffffff" : BARRIER_COLOR;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // ボスの後ろに描く、強そうに見せるためのオーラ。体の形に沿って燃え上がる炎と、立ちのぼる火の粉。
   // HPが半分を切って攻撃が激しくなると、紫から赤に変わって大きく速く揺らめく
   private drawBossAura(ctx: CanvasRenderingContext2D, boss: Boss): void {
-    const enraged = boss.hp <= boss.maxHp * BOSS_ENRAGE_RATIO;
+    const enraged = this.isBossEnraged(boss);
     const color = enraged ? BOSS_AURA_ENRAGED : BOSS_AURA;
     const aura = auraSprite(boss.sprite, color);
     if (!aura) return;
@@ -2088,14 +2535,12 @@ export class ShootingEngine {
   private drawPlayer(ctx: CanvasRenderingContext2D): void {
     // 無敵の間は点滅させる(ミニ戦闘機も一緒に)
     if (this.invincibleMs > 0 && Math.floor(this.invincibleMs / 90) % 2 === 0) return;
-    if (this.shotLevel >= MINI_FIGHTER_LEVEL) {
-      for (const m of this.minis) {
-        ctx.save();
-        ctx.translate(m.x, m.y);
-        ctx.scale(0.5, 0.5);
-        this.drawFighter(ctx);
-        ctx.restore();
-      }
+    for (const m of this.activeMinis()) {
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      ctx.scale(0.5, 0.5);
+      this.drawFighter(ctx);
+      ctx.restore();
     }
     ctx.save();
     ctx.translate(this.playerX, this.playerY);
@@ -2218,18 +2663,60 @@ export class ShootingEngine {
       ctx.restore();
       return;
     }
+    this.drawPowerItem(ctx, item.ageMs);
+    ctx.restore();
+  }
+
+  // パワーアップは、きらきら光る金色の星。まわりの光がまたたき、星はゆっくり回る
+  private drawPowerItem(ctx: CanvasRenderingContext2D, ageMs: number): void {
+    const twinkle = 0.75 + Math.sin(ageMs / 90) * 0.25;
+    const outer = ITEM_RADIUS * 1.35;
+    const inner = outer * 0.45;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const glowR = ITEM_RADIUS * 2.4;
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, glowR);
+    glow.addColorStop(0, `rgba(255, 240, 150, ${0.75 * twinkle})`);
+    glow.addColorStop(0.4, `rgba(255, 200, 40, ${0.35 * twinkle})`);
+    glow.addColorStop(1, "rgba(255, 180, 0, 0)");
+    ctx.fillStyle = glow;
     ctx.beginPath();
-    ctx.arc(0, 0, ITEM_RADIUS, 0, Math.PI * 2);
-    ctx.fillStyle = "#34a853";
+    ctx.arc(0, 0, glowR, 0, Math.PI * 2);
     ctx.fill();
+    // 十字の光の筋
+    ctx.globalAlpha = twinkle;
+    ctx.fillStyle = "rgba(255, 250, 220, 0.9)";
+    const ray = ITEM_RADIUS * 2.3;
+    for (let i = 0; i < 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(-ray, 0);
+      ctx.quadraticCurveTo(0, -1.5, ray, 0);
+      ctx.quadraticCurveTo(0, 1.5, -ray, 0);
+      ctx.fill();
+      ctx.rotate(Math.PI / 2);
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.rotate(ageMs / 900);
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? outer : inner;
+      const a = -Math.PI / 2 + (i * Math.PI) / 5;
+      ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath();
+    const body = ctx.createRadialGradient(0, -outer * 0.2, 0, 0, 0, outer);
+    body.addColorStop(0, "#fffbe0");
+    body.addColorStop(0.5, "#ffd84a");
+    body.addColorStop(1, "#ffab00");
+    ctx.fillStyle = body;
+    ctx.fill();
+    ctx.lineJoin = "round";
     ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "800 14px 'Baloo 2', sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("P", 0, 1);
     ctx.restore();
   }
 
@@ -2247,6 +2734,24 @@ export class ShootingEngine {
     ctx.stroke(heart);
     ctx.fillStyle = BULLET_PINK;
     ctx.fill(heart);
+  }
+
+  // レベル9の衝撃波: 蛍光ピンクの光の輪。広がるほど薄くなる
+  private drawShockwave(ctx: CanvasRenderingContext2D, w: { x: number; y: number; r: number; maxR: number }): void {
+    const fade = 1 - w.r / w.maxR;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, w.r, 0, Math.PI * 2);
+    ctx.globalAlpha = 0.35 * fade;
+    ctx.strokeStyle = SHOT_NEON;
+    ctx.lineWidth = 18;
+    ctx.stroke();
+    ctx.globalAlpha = 0.9 * fade;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // 強い弾の爆発: オレンジの光が一瞬ふくらみ、輪が広がって消える
