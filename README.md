@@ -13,6 +13,11 @@ npm test       # テスト
 npm run lint
 ```
 
+## 音楽について
+
+BGM・ジングルは SketchyLogic さんの [NES Shooter Music (5 tracks, 3 jingles)](https://opengameart.org/content/nes-shooter-music-5-tracks-3-jingles)（CC0）を使っています。
+効果音はコードで合成しています（`src/lib/sound.ts`）。
+
 ## 写真について
 
 このリポジトリの写真（`public/images/` など）は実在の人物を撮影したものです。

@@ -36,8 +36,8 @@ export function fanAngles(center: number, count: number, spread: number): number
   return Array.from({ length: count }, (_, i) => start + spread * i);
 }
 
-// 倒した数に応じて、出現の間隔を開始値から終了値へ直線的に縮める
-export function spawnInterval(kills: number, killsBeforeBoss: number, startMs: number, endMs: number): number {
-  const t = clamp(kills / killsBeforeBoss, 0, 1);
+// 経過時間に応じて、出現の間隔を開始値から終了値へ直線的に縮める
+export function spawnInterval(elapsedMs: number, totalMs: number, startMs: number, endMs: number): number {
+  const t = clamp(elapsedMs / totalMs, 0, 1);
   return startMs + (endMs - startMs) * t;
 }

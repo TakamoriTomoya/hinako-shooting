@@ -9,14 +9,13 @@ interface Props {
   stageBanner: string | null;
   score: number;
   lives: number;
-  killsUntilBoss: number;
   bossName: string;
   bossHpPercent: number | null;
   bossWarning: boolean;
   hintVisible: boolean;
 }
 
-export function BattlePage({ stage, stageBanner, score, lives, killsUntilBoss, bossName, bossHpPercent, bossWarning, hintVisible }: Props): PageSlots {
+export function BattlePage({ stage, stageBanner, score, lives, bossName, bossHpPercent, bossWarning, hintVisible }: Props): PageSlots {
   return {
     header: (
       // 横長のPC画面でもスコアやHPが戦場から離れすぎないよう、幅に上限をつける
@@ -30,7 +29,6 @@ export function BattlePage({ stage, stageBanner, score, lives, killsUntilBoss, b
         ) : (
           <div className="font-heading text-sm font-bold text-white text-outline">
             STAGE {stage}
-            {killsUntilBoss > 0 && ` ・ ボスまで あと ${killsUntilBoss}`}
           </div>
         )}
       </div>

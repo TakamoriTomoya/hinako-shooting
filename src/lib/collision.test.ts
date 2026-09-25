@@ -56,9 +56,9 @@ describe("clamp / spawnInterval", () => {
     expect(clamp(11, 0, 10)).toBe(10);
   });
 
-  it("倒した数に応じて開始値から終了値へ縮み、それ以上は縮まない", () => {
-    expect(spawnInterval(0, 20, 1700, 1100)).toBe(1700);
-    expect(spawnInterval(10, 20, 1700, 1100)).toBe(1400);
-    expect(spawnInterval(40, 20, 1700, 1100)).toBe(1100);
+  it("経過時間に応じて開始値から終了値へ縮み、それ以上は縮まない", () => {
+    expect(spawnInterval(0, 20000, 1700, 1100)).toBe(1700);
+    expect(spawnInterval(10000, 20000, 1700, 1100)).toBe(1400);
+    expect(spawnInterval(40000, 20000, 1700, 1100)).toBe(1100);
   });
 });
